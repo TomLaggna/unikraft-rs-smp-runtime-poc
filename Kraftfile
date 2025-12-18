@@ -1,0 +1,9 @@
+spec: v0.6
+
+name: smp-poc
+
+runtime: base:latest
+
+rootfs: ./Dockerfile
+
+cmd: ["smp-poc"]
