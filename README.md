@@ -45,7 +45,7 @@ Conclusions:
 - requires access to the unikraft internal API (no rust bindings? -> have to use FFI?)
 
 ```qemu-system-x86_64 \
-  -kernel EXTRACTED_BASE_LATEST_BINARIES/kernel \
+  -kernel base_kernel/kernel \
   -initrd .unikraft/build/initramfs-x86_64.cpio \
   -machine pc,accel=kvm \
   -cpu host,+x2apic,-pmu \

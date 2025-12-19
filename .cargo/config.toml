@@ -1,0 +1,5 @@
+# Cargo configuration for Unikraft x86_64 build
+# PIE-compatible for elfloader
+
+[target.x86_64-unknown-linux-musl]
+rustflags = []
