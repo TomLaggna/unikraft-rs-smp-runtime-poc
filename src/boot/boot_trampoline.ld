@@ -5,9 +5,9 @@ OUTPUT_ARCH(i386:x86-64)
 ENTRY(lcpu_start16_ap)
 
 SECTIONS {
-    /* All code and data should be contiguous and start at 0x0 */
-    /* Will be copied to 0x8000 at runtime */
-    . = 0x0;
+    /* All code and data starts at 0x8000 - the actual runtime address */
+    /* This way the linker calculates absolute addresses for us */
+    . = 0x8000;
     
     .boot : {
         /* 16-bit real mode code - MUST be first (entry point) */

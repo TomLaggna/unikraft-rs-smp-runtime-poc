@@ -47,9 +47,12 @@ impl CpuData {
 
 // Embed the boot trampoline binary blob (compiled separately)
 // This contains all sections contiguously: 16-bit, 32-bit data, 32-bit code, 64-bit code
+// Built with base address 0x8000, so all internal addresses are already correct!
 static TRAMPOLINE_BLOB: &[u8] = include_bytes!("../../build/boot_trampoline.bin");
 
 // Offsets within the binary blob (from nm build/boot_trampoline.elf)
+// Note: These are now absolute addresses since linker script starts at 0x8000
+// We need the offsets relative to 0x8000 for patching
 const OFFSET_X86_BPT_PML4_ADDR: usize = 0x2000;
 const OFFSET_LCPUS: usize = 0x2040;
 
@@ -182,31 +185,31 @@ impl BootTrampoline {
 
     /// Apply relocations to the copied trampoline
     ///
-    /// The trampoline contains position-dependent code with placeholder
-    /// values that need to be patched to match the target address.
-    ///
-    /// This is a simplified version - in the full implementation, you'd
-    /// walk through relocation entries and patch each one.
+    /// NOT NEEDED! Since we build the trampoline with base address 0x8000,
+    /// the linker calculates all internal addresses for us at compile time.
+    /// No runtime patching required!
     pub unsafe fn apply_relocations(&self) -> Result<(), &'static str> {
         println!(
-            "Applying relocations for target address 0x{:x}",
+            "✓ No relocations needed (trampoline built for 0x{:x})",
             self.target_addr
         );
-
-        // In the full implementation, this would:
-        // 1. Find all relocation entries (symbols ending in _imm*_start16 or _data*_start16)
-        // 2. Patch each placeholder (0x1516) with (target_addr + offset)
-        //
-        // For now, we'll just log that this needs to be implemented
-        println!("⚠ Relocation patching not yet implemented");
-        println!("  The trampoline may not work correctly without proper relocations");
-
         Ok(())
     }
 
     /// Get the SIPI vector for this trampoline location
     pub fn get_sipi_vector(&self) -> u8 {
         (self.target_addr >> 12) as u8
+    }
+
+    /// Get the state of a specific CPU
+    ///
+    /// # Safety
+    /// Reads from the CPU data structure in the trampoline memory
+    pub unsafe fn get_cpu_state(&self, cpu_idx: u32) -> i32 {
+        let target_offset = OFFSET_LCPUS + (cpu_idx as usize * 64);
+        let target_cpu_ptr = (self.target_addr as usize + target_offset) as *const CpuData;
+        let cpu_data = ptr::read_volatile(target_cpu_ptr);
+        cpu_data.state
     }
 
     /// Get the target address where the trampoline is located

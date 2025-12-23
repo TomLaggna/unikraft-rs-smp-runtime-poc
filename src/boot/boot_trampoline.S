@@ -16,24 +16,7 @@
 .section .data
 .globl x86_start16_addr
 x86_start16_addr:
-	.quad	0x8000		/* Default target address in first 1MB */
-
-/*
- * Macros for position-independent code in 16-bit section
- * These create relocation entries that must be patched at runtime
- */
-.macro mov_start16 sym:req, reg:req, bytes:req
-	mov	$0x1516, \reg	/* Placeholder: IS16 */
-.globl	\sym\()_imm\bytes\()_start16
-.set	\sym\()_imm\bytes\()_start16, (. - \bytes)
-	nop
-.endm
-
-.macro data_start16 type:req, sym:req, bytes:req
-.globl	\sym\()_data\bytes\()_start16
-.set	\sym\()_data\bytes\()_start16, .
-	.\type	0x1516		/* Placeholder: IS16 */
-.endm
+	.quad	0x8000		/* Target address in first 1MB */
 
 /* ========================================================================== */
 /* 16-BIT REAL MODE SECTION - Entry point from SIPI                          */
@@ -43,14 +26,20 @@ x86_start16_addr:
 .globl x86_start16_begin
 x86_start16_begin:
 
-.code16
+.code16  /* GCC's 16-bit mode - handles 32-bit operands properly */
 .globl lcpu_start16_ap
 ENTRY(lcpu_start16_ap)
+	/* Debug: Send 'A' to COM1 (0x3F8) to signal AP started */
+	movb	$'A', %al
+	movw	$0x3F8, %dx
+	outb	%al, %dx
+	
 	/* Clear pointers to startup and platform boot parameters */
 	xorl	%edi, %edi
 	xorl	%esi, %esi
 
-	mov_start16	lcpu_start16, %ax, 2
+	/* Load address of lcpu_start16 */
+	movw	$lcpu_start16, %ax
 	/* On start-up a core's %cs is set depending on the value of the vector
 	 * inside the SIPI message, so make sure we are jumping to the
 	 * proper address w.r.t. segmentation.
@@ -73,7 +62,7 @@ gdt32_null:
 .globl gdt32_ptr
 gdt32_ptr:
 	.word	(gdt32_end - gdt32 - 1)	/* size - 1	*/
-	data_start16	long, gdt32, 4	/* GDT address	*/
+	.long	gdt32			/* GDT address - linker calculates */
 gdt32_cs:
 	.quad	GDT_DESC_CODE32_VAL	/* 32-bit CS	*/
 gdt32_ds:
@@ -92,15 +81,13 @@ ENTRY(lcpu_start16)
 	movl	%eax, %cr0
 
 	/* Load 32-bit GDT and jump into 32-bit code segment */
-	mov_start16	gdt32_ptr, %ax, 2
+	movw	$gdt32_ptr, %ax
 	lgdt	(%eax)
 
-	/* ljmp encoding: 0xEA <offset:32> <segment:16>
-	 * We patch the offset at runtime
-	 */
-	mov_start16	jump_to32, %ax, 2
+	/* ljmp to 32-bit code */
+	movw	$jump_to32, %ax
 	movw	%ax, -4(%eax)
-	ljmp	$(gdt32_cs - gdt32), $0x1532	/* 0x1532 = IS32 placeholder */
+	ljmp	$(gdt32_cs - gdt32), $jump_to32
 
 .code32
 .globl jump_to32
@@ -115,8 +102,8 @@ jump_to32:
 	movl	%eax, %fs
 	movl	%eax, %gs
 
-	mov_start16	lcpu_start32, %eax, 4
-
+	/* Jump to 32-bit entry - use full 32-bit address in 32-bit mode */
+	movl	$lcpu_start32, %eax
 	jmp	*%eax
 END(lcpu_start16)
 

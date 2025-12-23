@@ -19,13 +19,17 @@ If a `Kraftfile` contains more targets, the correct one can be selected through 
 
 ## Run
 
-In order to run the locally built image, use `kraft`:
+In order to run the locally built image, use `make run`:
 
 ```bash
-kraft run --rm --plat qemu --arch x86_64 .
+make run
 ```
 
-It will print out a "Hello, World!" message.
+Note that this will assume you have a buildkit docker container running/startable.
+```
+docker run -d --name buildkitd --privileged moby/buildkit:latest
+``` 
+This is only required once, the make command will start buildkitd if it exists but is just stopped.
 
 ## Learn more
 
@@ -63,3 +67,4 @@ Conclusions:
   - attach gdb via `gdb -ex 'target remote :1234' base_kernel/kernel.dbg`
   - running in debug mode might detach qemu from the console
   - find the process via `ps -ef | grep qemu-system-x86_64` and then use `kill` to close it
+  - TODO: figure out how to attach the symbols of the client application in order to properly debug the client app

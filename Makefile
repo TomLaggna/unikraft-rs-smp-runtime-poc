@@ -90,7 +90,7 @@ rust: asm
 # Build initramfs using kraft
 build-initrd: rust buildkit
 	@echo "Building initramfs with kraft..."
-	$(KRAFT) build --plat qemu --arch x86_64
+	KRAFT_LOG_LEVEL=trace $(KRAFT) build --plat qemu --arch x86_64
 	@echo "✓ Initramfs created: $(INITRD)"
 
 # Setup buildkit containe

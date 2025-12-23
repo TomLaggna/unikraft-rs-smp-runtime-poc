@@ -111,6 +111,12 @@ pub unsafe fn send_init_ipi(dest: u32) {
     wrmsr(MSR_APIC_ICR, icr, dest);
 }
 
+/// De-assert INIT IPI (required before SIPI)
+pub unsafe fn deassert_init_ipi(dest: u32) {
+    let icr = APIC_ICR_TRIGGER_LEVEL | APIC_ICR_DESTMODE_PHYSICAL | APIC_ICR_DMODE_INIT;
+    wrmsr(MSR_APIC_ICR, icr, dest);
+}
+
 /// Send Start-up IPI (SIPI) to target CPU
 ///
 /// # Arguments
@@ -123,11 +129,8 @@ pub unsafe fn send_startup_ipi(addr: u64, dest: u32) {
     );
 
     let vector = (addr >> 12) as u32;
-    let icr = APIC_ICR_TRIGGER_LEVEL
-        | APIC_ICR_LEVEL_ASSERT
-        | APIC_ICR_DESTMODE_PHYSICAL
-        | APIC_ICR_DMODE_SUP
-        | vector;
+    // SIPI uses edge-triggered, not level-triggered!
+    let icr = APIC_ICR_DESTMODE_PHYSICAL | APIC_ICR_DMODE_SUP | vector;
 
     wrmsr(MSR_APIC_ICR, icr, dest);
 }
