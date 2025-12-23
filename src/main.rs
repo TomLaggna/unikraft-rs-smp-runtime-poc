@@ -36,17 +36,21 @@ fn main() {
 
     unsafe {
         // Copy boot code to low memory
-        trampoline.copy_to_target();
+        if let Err(e) = trampoline.copy_to_target() {
+            panic!("Failed to copy trampoline: {}", e);
+        }
         println!("Boot trampoline copied to 0x{:x}", TRAMPOLINE_ADDR);
 
         // Apply runtime relocations
-        trampoline.apply_relocations();
+        if let Err(e) = trampoline.apply_relocations() {
+            panic!("Failed to apply relocations: {}", e);
+        }
         println!("Relocations applied");
 
         // Set page table address (get from CR3)
         let cr3: u64;
         asm!("mov {}, cr3", out(reg) cr3);
-        trampoline.set_page_table(cr3 as u32);
+        trampoline.set_page_table(cr3);
         println!("Page table set: 0x{:x}", cr3);
 
         // Step 4: Initialize per-CPU data structures
@@ -60,7 +64,9 @@ fn main() {
             // Set entry point to our AP entry function
             let entry = ap_entry as *const () as u64;
 
-            trampoline.init_cpu(i, apic_id, entry, stack);
+            if let Err(e) = trampoline.init_cpu(i, apic_id, entry, stack) {
+                panic!("Failed to initialize CPU {}: {}", i, e);
+            }
             println!("Initialized CPU {} (APIC ID {})", i, apic_id);
         }
 

@@ -17,6 +17,9 @@ COPY ./Makefile ./Makefile
 # Install musl target
 RUN rustup target add x86_64-unknown-linux-musl
 
+# make asm build for boot trampoline
+RUN make asm
+
 # Build Rust application
 RUN cargo build --release --target x86_64-unknown-linux-musl --bin smp-poc
 

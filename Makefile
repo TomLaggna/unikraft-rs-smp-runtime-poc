@@ -47,14 +47,27 @@ QEMU_FLAGS := -kernel $(KERNEL) \
               -rtc base=utc \
               -append 'vfs.fstab=[ "initrd0:/:extract:::" ] env.vars=[ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ] -- /smp-poc'
 
-.PHONY: all rust build-initrd run debug clean help buildkit
+.PHONY: all asm rust build-initrd run debug clean help buildkit
 
 # Default target
-all: rust
+all: asm rust
 
-# Build Rust application (assembly is embedded via global_asm!)
-rust:
-	@echo "Building Rust application with embedded assembly..."
+# Build boot trampoline assembly (without PIE - it's position-dependent by design)
+asm: $(ASM_LIB)
+	@echo "✓ Assembly library ready: $(ASM_LIB)"
+
+$(ASM_OBJ): $(ASM_SRC) $(ASM_HDR)
+	@mkdir -p $(BUILD_DIR)
+	@echo "Compiling boot trampoline assembly..."
+	$(GCC) $(ASFLAGS) -o $@ $(ASM_SRC)
+
+$(ASM_LIB): $(ASM_OBJ)
+	@echo "Creating static library..."
+	ar rcs $@ $<
+
+# Build Rust application (links to assembly library)
+rust: asm
+	@echo "Building Rust application..."
 	$(CARGO) build --release --target $(RUST_TARGET)
 	@echo "✓ Rust build complete: $(BINARY)"
 
@@ -98,6 +111,7 @@ debug: all
 clean:
 	@echo "Cleaning build artifacts..."
 	$(CARGO) clean
+	rm -rf $(BUILD_DIR)
 	@echo "✓ Clean complete"
 
 # Help target

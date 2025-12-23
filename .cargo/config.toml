@@ -2,4 +2,8 @@
 # PIE-compatible for elfloader
 
 [target.x86_64-unknown-linux-musl]
-rustflags = []
+rustflags = [
+    "-L", "/home/user/unikraft-rs-smp-runtime-poc/build",  # absolute path for native build
+    "-L", "/build", # separate absolute path for build inside buildkitd
+    "-l", "static=boot_trampoline",  # Link libboot_trampoline.a
+]
