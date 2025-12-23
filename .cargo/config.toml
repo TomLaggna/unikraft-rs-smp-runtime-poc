@@ -1,9 +1,7 @@
 # Cargo configuration for Unikraft x86_64 build
 # PIE-compatible for elfloader
+# Note: We embed the trampoline as binary blob, no linking needed
 
 [target.x86_64-unknown-linux-musl]
-rustflags = [
-    "-L", "/home/user/unikraft-rs-smp-runtime-poc/build",  # absolute path for native build
-    "-L", "/build", # separate absolute path for build inside buildkitd
-    "-l", "static=boot_trampoline",  # Link libboot_trampoline.a
-]
+rustflags = []
+

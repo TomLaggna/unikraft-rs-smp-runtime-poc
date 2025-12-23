@@ -19,7 +19,10 @@ KERNEL_DIR := base_kernel
 # Assembly source and object
 ASM_SRC := $(BOOT_DIR)/boot_trampoline.S
 ASM_HDR := $(BOOT_DIR)/boot_defs.h
+ASM_LD := $(BOOT_DIR)/boot_trampoline.ld
 ASM_OBJ := $(BUILD_DIR)/boot_trampoline.o
+ASM_ELF := $(BUILD_DIR)/boot_trampoline.elf
+ASM_BIN := $(BUILD_DIR)/boot_trampoline.bin
 ASM_LIB := $(BUILD_DIR)/libboot_trampoline.a
 
 # Final binary
@@ -52,20 +55,33 @@ QEMU_FLAGS := -kernel $(KERNEL) \
 # Default target
 all: asm rust
 
-# Build boot trampoline assembly (without PIE - it's position-dependent by design)
-asm: $(ASM_LIB)
-	@echo "✓ Assembly library ready: $(ASM_LIB)"
+# Build boot trampoline as standalone binary blob
+asm: $(ASM_BIN)
+	@echo "✓ Boot trampoline binary ready: $(ASM_BIN) ($$(stat -c%s $(ASM_BIN)) bytes)"
 
 $(ASM_OBJ): $(ASM_SRC) $(ASM_HDR)
 	@mkdir -p $(BUILD_DIR)
 	@echo "Compiling boot trampoline assembly..."
 	$(GCC) $(ASFLAGS) -o $@ $(ASM_SRC)
 
+# Link with custom linker script to make all sections contiguous
+$(ASM_ELF): $(ASM_OBJ) $(ASM_LD)
+	@echo "Linking boot trampoline ELF..."
+	$(GCC) -nostdlib -no-pie -static -T$(ASM_LD) -o $@ $(ASM_OBJ)
+
+# Extract raw binary (all sections contiguous)
+$(ASM_BIN): $(ASM_ELF)
+	@echo "Extracting boot trampoline binary..."
+	objcopy -O binary $< $@
+	@echo "  Sections:"
+	@objdump -h $(ASM_ELF) | grep -E '(Idx|\.boot)'
+
+# Build static library for symbol compatibility (not actually linked)
 $(ASM_LIB): $(ASM_OBJ)
-	@echo "Creating static library..."
+	@echo "Creating static library (for reference only)..."
 	ar rcs $@ $<
 
-# Build Rust application (links to assembly library)
+# Build Rust application (embeds binary via include_bytes!)
 rust: asm
 	@echo "Building Rust application..."
 	$(CARGO) build --release --target $(RUST_TARGET)
@@ -105,7 +121,7 @@ run: build-initrd
 debug: all
 	@echo "Starting QEMU with GDB server on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -s -S &
-	@echo "Connect with: gdb -ex 'target remote :1234' $(KERNEL)"
+	@echo "Connect with: gdb -ex 'target remote :1234' $(KERNEL).dbg"
 
 # Clean build artifacts
 clean:

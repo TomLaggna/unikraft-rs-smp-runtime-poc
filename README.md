@@ -55,4 +55,11 @@ Conclusions:
   -netdev user,id=hostnet0,hostfwd=tcp::8080-:8080 \
   -nographic -no-reboot -parallel none \
   -rtc base=utc \
-  -append 'vfs.fstab=[ "initrd0:/:extract:::" ] env.vars=[ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ] -- /smp-poc'```
+  -append 'vfs.fstab=[ "initrd0:/:extract:::" ] env.vars=[ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ] -- /smp-poc'
+  ```
+
+  ## qemu
+  - use `make debug` to start qemu in halted mode
+  - attach gdb via `gdb -ex 'target remote :1234' base_kernel/kernel.dbg`
+  - running in debug mode might detach qemu from the console
+  - find the process via `ps -ef | grep qemu-system-x86_64` and then use `kill` to close it

@@ -45,16 +45,13 @@ impl CpuData {
     }
 }
 
-// External symbols from boot_trampoline.S
-extern "C" {
-    // Code section boundaries
-    static x86_start16_begin: u8;
-    static x86_start16_end: u8;
+// Embed the boot trampoline binary blob (compiled separately)
+// This contains all sections contiguously: 16-bit, 32-bit data, 32-bit code, 64-bit code
+static TRAMPOLINE_BLOB: &[u8] = include_bytes!("../../build/boot_trampoline.bin");
 
-    // Data structures to patch at runtime
-    static mut x86_bpt_pml4_addr: u32; // Page table root (CR3)
-    static mut lcpus: [CpuData; 256]; // Per-CPU array (max 256 CPUs)
-}
+// Offsets within the binary blob (from nm build/boot_trampoline.elf)
+const OFFSET_X86_BPT_PML4_ADDR: usize = 0x2000;
+const OFFSET_LCPUS: usize = 0x2040;
 
 /// Boot trampoline manager
 ///
@@ -87,43 +84,39 @@ impl BootTrampoline {
         Self { target_addr }
     }
 
-    /// Get the size of the 16-bit boot code section
-    pub fn get_16bit_section_size() -> usize {
-        unsafe {
-            let begin = &x86_start16_begin as *const u8 as usize;
-            let end = &x86_start16_end as *const u8 as usize;
-            end - begin
-        }
+    /// Get the size of the entire boot trampoline blob
+    pub fn get_blob_size() -> usize {
+        TRAMPOLINE_BLOB.len()
     }
 
     /// Copy the trampoline code to the target address
     ///
-    /// This copies the position-dependent assembly code from the linked
-    /// .text.boot.16 section to low memory where APs can execute it.
+    /// This copies the entire boot trampoline blob (all sections) to low memory.
     ///
     /// # Safety
     /// The target address must point to valid, writable memory
     pub unsafe fn copy_to_target(&self) -> Result<(), &'static str> {
-        let size = Self::get_16bit_section_size();
-        let src = &x86_start16_begin as *const u8;
         let dst = self.target_addr as *mut u8;
 
         println!(
-            "Copying {} bytes of trampoline from {:p} to 0x{:x}",
-            size, src, self.target_addr
+            "Copying {} bytes of trampoline blob to 0x{:x}",
+            TRAMPOLINE_BLOB.len(),
+            self.target_addr
         );
 
         // Check if target is writable (simple test)
-        // In a real scenario, this might fail if memory is not mapped
         let test_ptr = dst as *mut u32;
         if test_ptr.is_null() {
             return Err("Target address is null");
         }
 
-        // Copy the trampoline code
-        ptr::copy_nonoverlapping(src, dst, size);
+        // Copy the entire trampoline blob
+        ptr::copy_nonoverlapping(TRAMPOLINE_BLOB.as_ptr(), dst, TRAMPOLINE_BLOB.len());
 
-        println!("✓ Trampoline copied successfully");
+        println!(
+            "✓ Trampoline copied successfully ({} bytes)",
+            TRAMPOLINE_BLOB.len()
+        );
         Ok(())
     }
 
@@ -137,16 +130,14 @@ impl BootTrampoline {
     pub unsafe fn set_page_table(&self, pml4_addr: u64) {
         println!("Setting page table address to 0x{:x}", pml4_addr);
 
-        // Write to the symbol in the linked binary
-        ptr::write_volatile(&raw mut x86_bpt_pml4_addr, pml4_addr as u32);
-
-        // Also patch the copied code at target address
-        let target_offset = &raw const x86_bpt_pml4_addr as *const u32 as usize
-            - &x86_start16_begin as *const u8 as usize;
-        let target_ptr = (self.target_addr as usize + target_offset) as *mut u32;
+        // Patch the copied blob at target address
+        let target_ptr = (self.target_addr as usize + OFFSET_X86_BPT_PML4_ADDR) as *mut u32;
         ptr::write_volatile(target_ptr, pml4_addr as u32);
 
-        println!("✓ Page table address set");
+        println!(
+            "✓ Page table address set at offset 0x{:x}",
+            OFFSET_X86_BPT_PML4_ADDR
+        );
     }
 
     /// Initialize a CPU's data structure
@@ -175,18 +166,17 @@ impl BootTrampoline {
             cpu_idx, apic_id, entry_fn, stack_ptr
         );
 
-        // Initialize the CPU data structure in the linked binary
-        let cpu_data = CpuData::init(cpu_idx, apic_id, entry_fn, stack_ptr);
-        ptr::write_volatile(&mut lcpus[cpu_idx as usize], cpu_data);
+        // Patch the CPU data structure in the copied blob
+        let target_offset = OFFSET_LCPUS + (cpu_idx as usize * 64);
+        let target_cpu_ptr = (self.target_addr as usize + target_offset) as *mut CpuData;
 
-        // Also patch the copied code at target address
-        let target_offset = &raw const lcpus as *const [CpuData; 256] as usize
-            - &x86_start16_begin as *const u8 as usize;
-        let target_cpu_ptr =
-            (self.target_addr as usize + target_offset + cpu_idx as usize * 64) as *mut CpuData;
+        let cpu_data = CpuData::init(cpu_idx, apic_id, entry_fn, stack_ptr);
         ptr::write_volatile(target_cpu_ptr, cpu_data);
 
-        println!("✓ CPU {} initialized", cpu_idx);
+        println!(
+            "✓ CPU {} initialized at offset 0x{:x}",
+            cpu_idx, target_offset
+        );
         Ok(())
     }
 
