@@ -6,6 +6,10 @@ mod cpu_startup;
 #[path = "boot/boot_trampoline_bindings.rs"]
 mod boot_trampoline_bindings;
 
+#[macro_use]
+mod ap_print;
+
+use ap_print::{ap_print, ap_print_hex, ap_print_u32};
 use boot_trampoline_bindings::BootTrampoline;
 use core::arch::asm;
 use core::ptr;
@@ -28,16 +32,6 @@ fn main() {
     println!("BSP running from: main() at 0x{:x}", main_addr);
     let ap_entry_addr = ap_entry as *const () as u64;
     println!("AP entry point: ap_entry() at 0x{:x}", ap_entry_addr);
-
-    // Test: Send a character directly to COM1 (0x3F8) to verify `out` works
-    // unsafe {
-    //     asm!("out dx, al", in("al") b'T' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-    //     asm!("out dx, al", in("al") b'E' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-    //     asm!("out dx, al", in("al") b'S' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-    //     asm!("out dx, al", in("al") b'T' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-    //     asm!("out dx, al", in("al") b'\n' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-    // }
-    // println!("Direct serial output test complete (should see TEST above)");
 
     // Step 1: Enable x2APIC on BSP
     unsafe {
@@ -158,6 +152,7 @@ fn main() {
                 delay_ms(10);
                 let state = trampoline.get_cpu_state(i);
                 if state != 0 {
+                    delay_ms(100);
                     println!("  CPU {} came online! State: {}", i, state);
                     break;
                 }
@@ -179,7 +174,7 @@ fn main() {
 
 /// Add identity mapping for low memory in page tables
 /// Maps virtual address range to the same physical addresses (identity map)
-unsafe fn add_identity_mapping(cr3: u64, virt_start: u64, size: u64) {
+unsafe fn add_identity_mapping(cr3: u64, _virt_start: u64, _size: u64) {
     // Use direct-map to access page table physical memory
     let pml4_phys = cr3 & !0xFFF;
     let pml4_virt = DIRECTMAP_AREA_START + pml4_phys;
@@ -219,190 +214,19 @@ unsafe fn add_identity_mapping(cr3: u64, virt_start: u64, size: u64) {
     asm!("invlpg [{}]", in(reg) 0x0usize, options(nostack, preserves_flags));
 }
 
-/// Check if a virtual address is mapped and get its attributes
-unsafe fn check_mapping(cr3: u64, virt_addr: u64) -> bool {
-    // 953MB physical memory limit from QEMU config
-    const PHYS_MEM_LIMIT: u64 = 953 * 1024 * 1024; // 0x3B900000
-
-    let pml4_phys = cr3 & !0xFFF;
-    let pml4_virt = DIRECTMAP_AREA_START + pml4_phys;
-    let pml4 = pml4_virt as *const u64;
-
-    let pml4_idx = (virt_addr >> 39) & 0x1FF;
-    let pml4_entry = ptr::read_volatile(pml4.add(pml4_idx as usize));
-
-    if pml4_entry & 1 == 0 {
-        println!("  PML4[{}] not present", pml4_idx);
-        return false;
-    }
-
-    let pdpt_phys = pml4_entry & 0x000FFFFFFFFFF000;
-    println!(
-        "  PML4[{}] = 0x{:016x} → PDPT @ 0x{:x}",
-        pml4_idx, pml4_entry, pdpt_phys
-    );
-    if pdpt_phys >= PHYS_MEM_LIMIT {
-        println!(
-            "    ERROR: PDPT address 0x{:x} exceeds {}MB limit!",
-            pdpt_phys, 953
-        );
-        return false;
-    }
-
-    let pdpt_virt = DIRECTMAP_AREA_START + pdpt_phys;
-    let pdpt = pdpt_virt as *const u64;
-
-    let pdpt_idx = (virt_addr >> 30) & 0x1FF;
-    let pdpt_entry = ptr::read_volatile(pdpt.add(pdpt_idx as usize));
-
-    if pdpt_entry & 1 == 0 {
-        println!("  PDPT[{}] not present", pdpt_idx);
-        return false;
-    }
-
-    if pdpt_entry & 0x80 != 0 {
-        let final_phys = (pdpt_entry & 0x000FFFFFC0000000) | (virt_addr & 0x3FFFFFFF);
-        println!(
-            "  PDPT[{}] = 0x{:016x} → 1GB page @ 0x{:x}",
-            pdpt_idx, pdpt_entry, final_phys
-        );
-        if final_phys >= PHYS_MEM_LIMIT {
-            println!(
-                "    ERROR: Final address 0x{:x} exceeds {}MB limit!",
-                final_phys, 953
-            );
-            return false;
-        }
-        return true;
-    }
-
-    let pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
-    println!(
-        "  PDPT[{}] = 0x{:016x} → PD @ 0x{:x}",
-        pdpt_idx, pdpt_entry, pd_phys
-    );
-    if pd_phys >= PHYS_MEM_LIMIT {
-        println!(
-            "    ERROR: PD address 0x{:x} exceeds {}MB limit!",
-            pd_phys, 953
-        );
-        return false;
-    }
-
-    let pd_virt = DIRECTMAP_AREA_START + pd_phys;
-    let pd = pd_virt as *const u64;
-
-    let pd_idx = (virt_addr >> 21) & 0x1FF;
-    let pd_entry = ptr::read_volatile(pd.add(pd_idx as usize));
-
-    if pd_entry & 1 == 0 {
-        println!("  PD[{}] not present", pd_idx);
-        return false;
-    }
-
-    if pd_entry & 0x80 != 0 {
-        let final_phys = (pd_entry & 0x000FFFFFFFE00000) | (virt_addr & 0x1FFFFF);
-        println!(
-            "  PD[{}] = 0x{:016x} → 2MB page @ 0x{:x}",
-            pd_idx, pd_entry, final_phys
-        );
-        if final_phys >= PHYS_MEM_LIMIT {
-            println!(
-                "    ERROR: Final address 0x{:x} exceeds {}MB limit!",
-                final_phys, 953
-            );
-            return false;
-        }
-        return true;
-    }
-
-    let pt_phys = pd_entry & 0x000FFFFFFFFFF000;
-    println!(
-        "  PD[{}] = 0x{:016x} → PT @ 0x{:x}",
-        pd_idx, pd_entry, pt_phys
-    );
-    if pt_phys >= PHYS_MEM_LIMIT {
-        println!(
-            "    ERROR: PT address 0x{:x} exceeds {}MB limit!",
-            pt_phys, 953
-        );
-        return false;
-    }
-
-    let pt_virt = DIRECTMAP_AREA_START + pt_phys;
-    let pt = pt_virt as *const u64;
-
-    let pt_idx = (virt_addr >> 12) & 0x1FF;
-    let pt_entry = ptr::read_volatile(pt.add(pt_idx as usize));
-
-    if pt_entry & 1 == 0 {
-        println!("  PT[{}] not present", pt_idx);
-        return false;
-    }
-
-    let final_phys = (pt_entry & 0x000FFFFFFFFFF000) | (virt_addr & 0xFFF);
-    println!(
-        "  PT[{}] = 0x{:016x} → FINAL @ 0x{:x}",
-        pt_idx, pt_entry, final_phys
-    );
-    if final_phys >= PHYS_MEM_LIMIT {
-        println!(
-            "    ERROR: Final address 0x{:x} exceeds {}MB limit!",
-            final_phys, 953
-        );
-        return false;
-    }
-
-    println!("  ✓ All addresses within 953MB limit");
-    true
-}
-
-/// Simplest possible AP entry for testing
-#[no_mangle]
-pub extern "C" fn ap_entry_simple(_cpu_data: *const boot_trampoline_bindings::CpuData) -> ! {
-    // Ultra minimal - just output Y and halt
-    unsafe {
-        core::arch::asm!(
-            "mov al, 0x59",
-            "mov dx, 0x3F8",
-            "out dx, al",
-            "2:",
-            "hlt",
-            "jmp 2b",
-            options(noreturn)
-        );
-    }
-}
-
 /// Entry point for Application Processors (APs)
-/// Called from boot_trampoline.S after CPU is in 64-bit mode
+
 #[no_mangle]
-#[unsafe(naked)]
 pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -> ! {
     unsafe {
-        core::arch::naked_asm!(
-            // Very first thing: send 'Y'
-            "mov al, 'Y'",
-            "mov dx, 0x3F8",
-            "out dx, al",
-            // Now jump to the real function
-            "jmp {real_entry}",
-            real_entry = sym ap_entry_real,
-        );
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn ap_entry_real(cpu_data: *const boot_trampoline_bindings::CpuData) -> ! {
-    unsafe {
         // Debug: Send 'Z' to show we made it to ap_entry_real
-        asm!("out dx, al", in("al") b'Z' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
+        // asm!("out dx, al", in("al") b'Z' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         let cpu = &*cpu_data;
         let cpu_id = cpu.idx;
 
         // Debug: Send '!' after reading cpu_id
-        asm!("out dx, al", in("al") b'!' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
+        // asm!("out dx, al", in("al") b'!' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         // Enable x2APIC on this CPU
         if let Err(_) = x2apic_enable() {
@@ -421,6 +245,56 @@ pub extern "C" fn ap_entry_real(cpu_data: *const boot_trampoline_bindings::CpuDa
         // Debug: Send '#' after state set
         asm!("out dx, al", in("al") b'#' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
+        // Initialize Rust runtime for this AP (TLS, etc.)
+        let tlsp = match ap_runtime_init() {
+            Ok(tls_ptr) => tls_ptr,
+            Err(e) => {
+                ap_print("Failed to initialize runtime: ");
+                ap_print_u32(e as u32);
+                ap_print("\n");
+                loop {
+                    asm!("hlt");
+                }
+            }
+        };
+
+        ap_print("Runtime init complete\n");
+
+        // Test 1: Basic arithmetic
+        ap_print("Test 1: Arithmetic... ");
+        let result = 5u32 + 7u32;
+        if result == 12 {
+            ap_print("PASS (5+7=12)\n");
+        } else {
+            ap_print("FAIL\n");
+        }
+
+        // Test 2: Stack usage - local variables
+        ap_print("Test 2: Stack arrays... ");
+        let mut stack_test: [u64; 4] = [1, 2, 3, 4];
+        stack_test[0] = stack_test[1] + stack_test[2];
+        if stack_test[0] == 5 {
+            ap_print("PASS (1+2+3+4, arr[0]=5)\n");
+        } else {
+            ap_print("FAIL\n");
+        }
+
+        // Test 3: Function calls (stack frame test)
+        ap_print("Test 3: Function calls... ");
+        fn test_multiply(x: u32, y: u32) -> u32 {
+            x * y
+        }
+        let mult_result = test_multiply(3, 4);
+        if mult_result == 12 {
+            ap_print("PASS (3*4=12)\n");
+        } else {
+            ap_print("FAIL\n");
+        }
+
+        // Use ap_println! macro which works without full runtime
+        ap_println!("CPU {} online! APIC ID: {}", cpu_id, cpu.id);
+        ap_println!("TLS base: 0x{:016x}", tlsp);
+
         // Wait for work (simplified - just halt)
         loop {
             asm!("hlt");
@@ -428,25 +302,88 @@ pub extern "C" fn ap_entry_real(cpu_data: *const boot_trampoline_bindings::CpuDa
     }
 }
 
-/// Allocate a stack (simplified - in real code use proper allocator)
-fn alloc_stack(size: usize) -> u64 {
-    static mut STACK_MEMORY: [u8; 4 * 16384] = [0; 4 * 16384];
-    static mut STACK_OFFSET: usize = 0;
+/// Initialize Rust runtime for AP (mainly TLS setup)
+fn ap_runtime_init() -> Result<usize, i32> {
+    // TLS symbols from linker
+    extern "C" {
+        static _tls_start: u8;
+        static _etdata: u8;
+        static _tls_end: u8;
+    }
 
     unsafe {
-        let stack_base =
-            core::ptr::addr_of!(STACK_MEMORY) as *const u8 as u64 + STACK_OFFSET as u64;
-        STACK_OFFSET += size;
-        let stack_top = stack_base + size as u64;
+        let tls_start = &_tls_start as *const u8 as usize;
+        let etdata = &_etdata as *const u8 as usize;
+        let tls_end = &_tls_end as *const u8 as usize;
 
-        // Debug: Print stack address range
-        if STACK_OFFSET == size {
-            println!(
-                "STACK_MEMORY is at: 0x{:x}",
-                core::ptr::addr_of!(STACK_MEMORY) as u64
+        let tdata_len = etdata - tls_start;
+        let tbss_len = tls_end - etdata;
+
+        // Calculate TLS area size (same as Unikraft's ukarch_tls_area_size)
+        // x86_64: TLS data + padding + TCB (8 bytes for self-pointer)
+        let tls_data_size = tdata_len + tbss_len;
+        let tls_data_aligned = (tls_data_size + 7) & !7; // align to 8
+        let tcb_size = 8; // Just the self-pointer for minimal TCB
+        let tls_total_size = tls_data_aligned + tcb_size;
+
+        // Allocate TLS area (32-byte aligned for x86_64)
+        let tls_area = alloc_aligned(tls_total_size, 32)?;
+
+        // Calculate TLS pointer (points to TCB, which is at the end)
+        let tlsp = tls_area + tls_total_size - tcb_size;
+
+        // Initialize TLS area:
+        // 1. Copy .tdata section
+        core::ptr::copy_nonoverlapping(tls_start as *const u8, tls_area as *mut u8, tdata_len);
+
+        // 2. Zero .tbss section
+        core::ptr::write_bytes((tls_area + tdata_len) as *mut u8, 0, tbss_len);
+
+        // 3. Zero padding
+        if tls_data_aligned > tls_data_size {
+            core::ptr::write_bytes(
+                (tls_area + tdata_len + tbss_len) as *mut u8,
+                0,
+                tls_data_aligned - tls_data_size,
             );
         }
 
-        stack_top // Return top of stack
+        // 4. Set up TCB self-pointer (required by x86_64 TLS ABI)
+        *(tlsp as *mut usize) = tlsp;
+
+        // 5. Set FS base register to point to TLS
+        core::arch::asm!(
+            "wrfsbase {0}",
+            in(reg) tlsp,
+            options(nostack, preserves_flags)
+        );
+
+        ap_print("TLS initialized at 0x");
+        ap_print_hex(tlsp as u64);
+        ap_print("\n");
+
+        Ok(tlsp)
+    }
+}
+
+/// Allocate aligned memory (simplified - use static pool)
+fn alloc_aligned(size: usize, align: usize) -> Result<usize, i32> {
+    static mut TLS_MEMORY: [u8; 8192] = [0; 8192]; // 8KB should be enough
+    static mut TLS_OFFSET: usize = 0;
+
+    unsafe {
+        // Align current offset
+        let base = core::ptr::addr_of!(TLS_MEMORY) as usize;
+        let current = base + TLS_OFFSET;
+        let aligned = (current + align - 1) & !(align - 1);
+        let offset_aligned = aligned - base;
+
+        // Check bounds without creating reference
+        if offset_aligned + size > 8192 {
+            return Err(-12); // ENOMEM
+        }
+
+        TLS_OFFSET = offset_aligned + size;
+        Ok(aligned)
     }
 }

@@ -85,6 +85,7 @@ impl BootTrampoline {
     }
 
     /// Get the size of the entire boot trampoline blob
+    #[allow(dead_code)]
     pub fn get_blob_size() -> usize {
         TRAMPOLINE_BLOB.len()
     }
@@ -194,6 +195,7 @@ impl BootTrampoline {
     }
 
     /// Get the SIPI vector for this trampoline location
+    #[allow(dead_code)]
     pub fn get_sipi_vector(&self) -> u8 {
         (self.target_addr >> 12) as u8
     }
