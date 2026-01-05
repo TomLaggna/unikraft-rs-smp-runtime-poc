@@ -68,16 +68,13 @@ impl BootTrampoline {
     /// Create a new boot trampoline manager
     ///
     /// # Arguments
-    /// * `target_addr` - Physical address to copy trampoline (must be < 1MB, page-aligned)
+    /// * `target_addr` - Virtual address to write trampoline (must be page-aligned)
+    ///                   For Unikraft, use: DIRECTMAP_AREA_START + physical_address
+    ///                   where physical_address is in the first 1MB
     ///
     /// # Panics
-    /// Panics if target_addr is not in first 1MB or not page-aligned
+    /// Panics if target_addr is not page-aligned
     pub fn new(target_addr: u64) -> Self {
-        assert!(
-            target_addr < 0x100000,
-            "Target address must be in first 1MB (got 0x{:x})",
-            target_addr
-        );
         assert!(
             target_addr & 0xfff == 0,
             "Target address must be page-aligned (got 0x{:x})",

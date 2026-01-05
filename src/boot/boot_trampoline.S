@@ -30,13 +30,17 @@ x86_start16_begin:
 .globl lcpu_start16_ap
 ENTRY(lcpu_start16_ap)
 	/* Debug: Send 'A' to COM1 (0x3F8) to signal AP started */
-	movb	$'A', %al
-	movw	$0x3F8, %dx
-	outb	%al, %dx
+	/* movb	$'A', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 	
 	/* Clear pointers to startup and platform boot parameters */
 	xorl	%edi, %edi
 	xorl	%esi, %esi
+
+	/* Debug: Send 'B' before address calculation */
+	/* movb	$'B', %al */
+	/* outb	%al, %dx */
 
 	/* Load address of lcpu_start16 */
 	movw	$lcpu_start16, %ax
@@ -73,6 +77,11 @@ gdt32_end:
 
 .code16
 ENTRY(lcpu_start16)
+	/* Debug: Send 'C' - reached lcpu_start16 */
+	/* movb	$'C', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+	
 	/* Disable interrupts */
 	cli
 
@@ -92,6 +101,11 @@ ENTRY(lcpu_start16)
 .code32
 .globl jump_to32
 jump_to32:
+	/* Debug: Send 'D' - in 32-bit mode */
+	/* movb	$'D', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+	
 	/* Set up remaining segment registers */
 	movl	$(gdt32_ds - gdt32), %eax
 	movl	%eax, %es
@@ -136,9 +150,19 @@ gdt64_ptr:
 .section .text.boot.32
 .globl lcpu_start32
 ENTRY(lcpu_start32)
+	/* Debug: Send 'E' - in lcpu_start32 */
+	/* movb	$'E', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+	
 	/* Enable physical address extension (PAE) */
 	movl	$CR4_BOOT32_SETTINGS, %eax
 	movl	%eax, %cr4
+
+	/* Debug: Send '1' - PAE enabled */
+	/* movb	$'1', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 
 	/* Switch to IA-32e mode (long mode) */
 	xorl	%edx, %edx
@@ -146,14 +170,33 @@ ENTRY(lcpu_start32)
 	movl	$X86_MSR_EFER, %ecx
 	wrmsr
 
+	/* Debug: Send '2' - long mode enabled in EFER */
+	/* movb	$'2', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	/* Set boot page table and enable paging
 	 * NOTE: x86_bpt_pml4 must be set by the BSP before starting APs
 	 */
 	movl	x86_bpt_pml4_addr, %eax
 	movl	%eax, %cr3
 
+	/* Flush TLB by reloading CR3 */
+	movl	%cr3, %eax
+	movl	%eax, %cr3
+
+	/* Debug: Send '3' - CR3 loaded */
+	/* movb	$'3', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	movl	$CR0_BOOT32_SETTINGS, %eax
 	movl	%eax, %cr0
+
+	/* Debug: Send '4' - paging enabled */
+	/* movb	$'4', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 
 	/* Load 64-bit GDT and jump to 64-bit code segment */
 	movl	$gdt64_ptr, %eax
@@ -166,6 +209,11 @@ ENTRY(lcpu_start32)
 
 .code64
 jump_to64:
+	/* Debug: Send 'F' - in 64-bit mode! */
+	/* movb	$'F', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+	
 	/* Set up remaining segment registers */
 	movl	$(gdt64_ds - gdt64), %eax
 	movl	%eax, %es
@@ -188,6 +236,11 @@ END(lcpu_start32)
 .section .text.boot.64
 .globl lcpu_start64
 ENTRY(lcpu_start64)
+	/* Debug: Send 'G' - in lcpu_start64 */
+	/* movb	$'G', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+	
 	/* Save the startup args pointer (if any) */
 	movq	%rdi, %r8
 
@@ -195,6 +248,11 @@ ENTRY(lcpu_start64)
 	movl	$1, %eax
 	cpuid
 	shrl	$24, %ebx		/* APIC ID now in EBX */
+
+	/* Debug: Send 'H' - got APIC ID */
+	/* movb	$'H', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 
 	/* Use APIC_ID * LCPU_SIZE for indexing the cpu structure */
 	movl	$LCPU_SIZE, %eax
@@ -204,8 +262,30 @@ ENTRY(lcpu_start64)
 	leaq	lcpus(%rip), %rbp
 	addq	%rax, %rbp
 
+	/* Debug: Send 'I' - computed CPU struct pointer */
+	/* movb	$'I', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
+	/* Debug: Send nibble of %rbp byte 6 to check address range */
+	/* movq	%rbp, %rax */
+	/* shrq	$48, %rax */
+	/* andb	$0x0F, %al */
+	/* cmpb	$10, %al */
+	/* jl	1f */
+	/* addb	$('A' - 10), %al */
+	/* jmp	2f */
+/* 1:	addb	$'0', %al */
+/* 2:	movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	/* Put CPU into init state */
 	movl	$LCPU_STATE_INIT, LCPU_STATE_OFFSET(%rbp)
+
+	/* Debug: Send 'J' - set state to INIT */
+	/* movb	$'J', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 
 	/* ====================================================================
 	 * Enable FPU and SSE
@@ -216,21 +296,57 @@ ENTRY(lcpu_start64)
 
 	fninit
 
+	/* Debug: Send 'K' - FPU initialized */
+	/* movb	$'K', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	jmp	ldmxcsr_rval_addr + 0x4
 
 ldmxcsr_rval_addr:
 	.long	0x1f80		/* Power-on default */
 
+	/* Debug: Send 'L' - after jump over data */
+	/* movb	$'L', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	movq	%cr4, %rdi
 	orl	$(X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT), %edi
 	movq	%rdi, %cr4
 
+	/* Debug: Send 'M' - CR4 SSE flags set */
+	/* movb	$'M', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
+	/* Debug: Send 'N' - about to leaq */
+	/* movb	$'N', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	leaq	ldmxcsr_rval_addr(%rip), %rbx
+	
+	/* Debug: Send 'O' - about to ldmxcsr */
+	/* movb	$'O', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	ldmxcsr	(%rbx)
+
+	/* Debug: Send 'P' - ldmxcsr done */
+	/* movb	$'P', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
 
 	/* ====================================================================
 	 * Enable XSAVE (if available)
 	 * ==================================================================== */
+	/* Debug: Send 'Q' - checking XSAVE */
+	/* movb	$'Q', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	testl	$(X86_CPUID1_ECX_XSAVE), %ecx
 	jz	no_xsave
 
@@ -243,6 +359,11 @@ no_xsave:
 	/* ====================================================================
 	 * Enable AVX (if available)
 	 * ==================================================================== */
+	/* Debug: Send 'R' - checking AVX */
+	/* movb	$'R', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	testl	$(X86_CPUID1_ECX_AVX), %ecx
 	jz	no_avx
 
@@ -258,6 +379,11 @@ no_avx:
 	/* ====================================================================
 	 * Request extended CPU features
 	 * ==================================================================== */
+	/* Debug: Send 'S' - about to CPUID(7) */
+	/* movb	$'S', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	movl	$7, %eax
 	xorl	%ecx, %ecx
 	cpuid
@@ -265,6 +391,11 @@ no_avx:
 	/* ====================================================================
 	 * Enable FS and GS base (if available)
 	 * ==================================================================== */
+	/* Debug: Send 'T' - checking FSGSBASE */
+	/* movb	$'T', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	testl	$(X86_CPUID7_EBX_FSGSBASE), %ebx
 	jz	no_fsgsbase
 
@@ -277,6 +408,11 @@ no_fsgsbase:
 	/* ====================================================================
 	 * Check if we have startup arguments supplied
 	 * ==================================================================== */
+	/* Debug: Send 'U' - about to check args */
+	/* movb	$'U', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	test	%r8, %r8
 	jz	no_args
 
@@ -287,23 +423,100 @@ no_fsgsbase:
 	jmp	jump_to_entry
 
 no_args:
+	/* Debug: Send 'V' - loading from CPU struct */
+	/* movb	$'V', %al */
+	/* movw	$0x3F8, %dx */
+	/* outb	%al, %dx */
+
 	/* Load the stack pointer and the entry address from the CPU struct */
 	movq	LCPU_ENTRY_OFFSET(%rbp), %rax
 	movq	LCPU_STACKP_OFFSET(%rbp), %rsp
 
 jump_to_entry:
+	/* Save entry address before any operations that might corrupt %rax */
+	movq	%rax, %r15
+	
+	/* Copy CPU struct pointer from %rbp to %rdi (first argument for Rust) */
+	movq	%rbp, %rdi
+
+	/* Set up minimal IDT with page fault handler */
+	subq	$4096, %rsp
+	movq	%rsp, %rbx
+	
+	/* Clear IDT (256 entries * 16 bytes = 4096 bytes) */
+	movq	%rbx, %rcx
+	movq	$512, %r8
+.Lclear_idt:
+	movq	$0, (%rcx)
+	addq	$8, %rcx
+	decq	%r8
+	jnz	.Lclear_idt
+	
+	/* Set up page fault handler (vector 14) */
+	leaq	page_fault_handler(%rip), %rax
+	leaq	0xE0(%rbx), %rcx	/* Entry 14 * 16 bytes */
+	
+	movw	%ax, 0(%rcx)		/* offset_low */
+	movw	$0x08, 2(%rcx)		/* selector */
+	movb	$0, 4(%rcx)		/* IST */
+	movb	$0x8E, 5(%rcx)		/* type_attr: present, DPL=0, interrupt gate */
+	shrq	$16, %rax
+	movw	%ax, 6(%rcx)		/* offset_mid */
+	shrq	$16, %rax
+	movl	%eax, 8(%rcx)		/* offset_high */
+	
+	/* Load IDT */
+	subq	$16, %rsp
+	movw	$4095, (%rsp)		/* limit */
+	movq	%rbx, 2(%rsp)		/* base */
+	lidt	(%rsp)
+	addq	$16, %rsp
+	addq	$4096, %rsp
+
 	/* Align stack to 16-byte boundary (System V AMD64 ABI requirement) */
 	andq	$~0xf, %rsp
-	subq	$0x8, %rsp
 
-	movq	%rbp, %rdi
-	xorq	%rbp, %rbp		/* Reset frame pointer */
+	/* Clear all registers except %rdi (arg) and %r15 (entry address) */
+	xorq	%rax, %rax
+	xorq	%rbx, %rbx
+	xorq	%rcx, %rcx
+	xorq	%rdx, %rdx
+	xorq	%rsi, %rsi
+	xorq	%rbp, %rbp
+	xorq	%r8, %r8
+	xorq	%r9, %r9
+	xorq	%r10, %r10
+	xorq	%r11, %r11
+	xorq	%r12, %r12
+	xorq	%r13, %r13
+	xorq	%r14, %r14
 
-	/* Jump to entry function
-	 * Arguments:
-	 * RDI = struct lcpu* (or APIC ID for Rust)
-	 */
-	jmp	*%rax
+	/* Jump to Rust entry point */
+	jmp	*%r15
+	
+	/* If we get here, something went wrong */
+	movb	$'?', %al
+	movw	$0x3F8, %dx
+	outb	%al, %dx
+	jmp	fail_loop
+
+/* Minimal page fault handler - outputs 'F' and halts */
+page_fault_handler:
+	pushq	%rax
+	pushq	%rdx
+	
+	/* Output 'F' for page fault */
+	movb	$'F', %al
+	movw	$0x3F8, %dx
+	outb	%al, %dx
+	
+	popq	%rdx
+	popq	%rax
+	
+	/* Halt */
+	cli
+1:	hlt
+	jmp	1b
 
 fail:
 	movl	$LCPU_STATE_HALTED, LCPU_STATE_OFFSET(%rbp)
@@ -332,6 +545,9 @@ x86_bpt_pml4_addr:
 .align 64
 lcpus:
 	.fill	(LCPU_SIZE * LCPU_MAXCOUNT), 1, 0
+
+
+
 
 /* Helper macros */
 .macro ENTRY name
