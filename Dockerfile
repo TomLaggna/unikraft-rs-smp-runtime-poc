@@ -14,6 +14,7 @@ COPY ./Cargo.toml ./Cargo.toml
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Makefile ./Makefile
 COPY ./tls_linker.ld ./tls_linker.ld
+COPY ./elf ./elf
 
 # Install musl target
 RUN rustup target add x86_64-unknown-linux-musl

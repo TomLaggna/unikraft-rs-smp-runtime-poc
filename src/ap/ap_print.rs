@@ -25,19 +25,19 @@ pub fn ap_print(msg: &str) {
 #[macro_export]
 macro_rules! ap_println {
     () => {
-        $crate::ap_print::ap_print("\n")
+        $crate::ap::ap_print::ap_print("\n")
     };
     ($($arg:tt)*) => {{
         use core::fmt::Write;
         struct SerialWriter;
         impl core::fmt::Write for SerialWriter {
             fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                $crate::ap_print::ap_print(s);
+                $crate::ap::ap_print::ap_print(s);
                 Ok(())
             }
         }
         let _ = core::write!(SerialWriter, $($arg)*);
-        $crate::ap_print::ap_print("\n");
+        $crate::ap::ap_print::ap_print("\n");
     }};
 }
 
