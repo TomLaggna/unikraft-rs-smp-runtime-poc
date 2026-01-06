@@ -1,4 +1,4 @@
-use crate::FunctionId;
+use super::FunctionId;
 use core::fmt;
 use std::time::Instant;
 

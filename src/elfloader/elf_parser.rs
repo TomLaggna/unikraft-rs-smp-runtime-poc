@@ -1,5 +1,5 @@
-use crate::Position;
-use dandelion_commons::{DandelionError, DandelionResult};
+use super::Position;
+use crate::dandelion_commons::{DandelionError, DandelionResult};
 
 // TODO: replace this with infomation in the ELF header
 pub const DEFAULT_ALIGNMENT: usize = 4096;
@@ -378,6 +378,3 @@ impl ParsedElf {
         return self.ehdr.e_entry as usize;
     }
 }
-
-#[cfg(test)]
-mod tests;

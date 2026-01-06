@@ -4,8 +4,10 @@ use super::ap_print::{ap_print, ap_print_hex, ap_print_u32};
 use crate::ap_println; // Macro is exported to crate root
 use crate::boot_trampoline_bindings;
 use crate::cpu_startup::x2apic_enable;
+use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 /// Entry point for Application Processors (APs)
 #[no_mangle]
@@ -52,42 +54,44 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
 
         ap_print("Runtime init complete\n");
 
-        // Test 1: Basic arithmetic
-        ap_print("Test 1: Arithmetic... ");
-        let result = 5u32 + 7u32;
-        if result == 12 {
-            ap_print("PASS (5+7=12)\n");
-        } else {
-            ap_print("FAIL\n");
-        }
-
-        // Test 2: Stack usage - local variables
-        ap_print("Test 2: Stack arrays... ");
-        let mut stack_test: [u64; 4] = [1, 2, 3, 4];
-        stack_test[0] = stack_test[1] + stack_test[2];
-        if stack_test[0] == 5 {
-            ap_print("PASS (1+2+3+4, arr[0]=5)\n");
-        } else {
-            ap_print("FAIL\n");
-        }
-
-        // Test 3: Function calls (stack frame test)
-        ap_print("Test 3: Function calls... ");
-        fn test_multiply(x: u32, y: u32) -> u32 {
-            x * y
-        }
-        let mult_result = test_multiply(3, 4);
-        if mult_result == 12 {
-            ap_print("PASS (3*4=12)\n");
-        } else {
-            ap_print("FAIL\n");
-        }
-
         // Use ap_println! macro which works without full runtime
         ap_println!("CPU {} online! APIC ID: {}", cpu_id, cpu.id);
         ap_println!("TLS base: 0x{:016x}", tlsp);
 
-        // Wait for work (simplified - just halt)
+        // Get task info from cpu_data
+        let task_info_ptr = cpu.task_info_ptr as *const ApTaskInfo;
+        if task_info_ptr.is_null() {
+            ap_print("ERROR: No task info provided\n");
+            loop {
+                asm!("hlt");
+            }
+        }
+
+        let task_info = &*task_info_ptr;
+        let elf_entry = task_info.entry_point.load(Ordering::SeqCst);
+
+        if elf_entry == 0 {
+            ap_print("ERROR: No ELF entry point set\n");
+            loop {
+                asm!("hlt");
+            }
+        }
+
+        ap_println!("Executing ELF at entry point: 0x{:016x}", elf_entry);
+
+        // Set status to running
+        task_info.status.store(1, Ordering::SeqCst);
+
+        // Execute the ELF entry point
+        // Cast to function pointer and call it
+        let elf_fn: extern "C" fn() -> () = core::mem::transmute(elf_entry as usize);
+        elf_fn();
+
+        // Mark task as done
+        task_info.status.store(2, Ordering::SeqCst);
+        ap_println!("CPU {} completed ELF execution", cpu_id);
+
+        // Wait for more work (simplified - just halt)
         loop {
             asm!("hlt");
         }

@@ -13,12 +13,13 @@ use core::ptr;
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct CpuData {
-    pub state: i32,     // LCPU_STATE_* (offset 0)
-    pub idx: u32,       // CPU index (offset 4)
-    pub id: u64,        // APIC ID (offset 8)
-    pub entry: u64,     // Entry point function (offset 16)
-    pub stack_ptr: u64, // Top of stack (offset 24)
-    _padding: [u8; 32], // Padding to 64 bytes
+    pub state: i32,         // LCPU_STATE_* (offset 0)
+    pub idx: u32,           // CPU index (offset 4)
+    pub id: u64,            // APIC ID (offset 8)
+    pub entry: u64,         // Entry point function (offset 16)
+    pub stack_ptr: u64,     // Top of stack (offset 24)
+    pub task_info_ptr: u64, // Pointer to ApTaskInfo (offset 32)
+    _padding: [u8; 24],     // Padding to 64 bytes
 }
 
 impl CpuData {
@@ -29,18 +30,20 @@ impl CpuData {
             id: 0,
             entry: 0,
             stack_ptr: 0,
-            _padding: [0; 32],
+            task_info_ptr: 0,
+            _padding: [0; 24],
         }
     }
 
-    pub fn init(idx: u32, apic_id: u64, entry: u64, stack_ptr: u64) -> Self {
+    pub fn init(idx: u32, apic_id: u64, entry: u64, stack_ptr: u64, task_info_ptr: u64) -> Self {
         Self {
             state: 0, // Will be updated by AP
             idx,
             id: apic_id,
             entry,
             stack_ptr,
-            _padding: [0; 32],
+            task_info_ptr,
+            _padding: [0; 24],
         }
     }
 }
@@ -151,27 +154,29 @@ impl BootTrampoline {
     /// * `apic_id` - APIC ID of the CPU
     /// * `entry_fn` - Entry point function for the AP
     /// * `stack_ptr` - Top of the stack for this AP
+    /// * `task_info_ptr` - Pointer to ApTaskInfo structure
     pub unsafe fn init_cpu(
         &self,
         cpu_idx: u32,
         apic_id: u64,
         entry_fn: u64,
         stack_ptr: u64,
+        task_info_ptr: u64,
     ) -> Result<(), &'static str> {
         if cpu_idx >= 256 {
             return Err("CPU index out of range");
         }
 
         println!(
-            "Initializing CPU {}: APIC ID={}, entry=0x{:x}, stack=0x{:x}",
-            cpu_idx, apic_id, entry_fn, stack_ptr
+            "Initializing CPU {}: APIC ID={}, entry=0x{:x}, stack=0x{:x}, task_info=0x{:x}",
+            cpu_idx, apic_id, entry_fn, stack_ptr, task_info_ptr
         );
 
         // Patch the CPU data structure in the copied blob
         let target_offset = OFFSET_LCPUS + (cpu_idx as usize * 64);
         let target_cpu_ptr = (self.target_addr as usize + target_offset) as *mut CpuData;
 
-        let cpu_data = CpuData::init(cpu_idx, apic_id, entry_fn, stack_ptr);
+        let cpu_data = CpuData::init(cpu_idx, apic_id, entry_fn, stack_ptr, task_info_ptr);
         ptr::write_volatile(target_cpu_ptr, cpu_data);
 
         println!(

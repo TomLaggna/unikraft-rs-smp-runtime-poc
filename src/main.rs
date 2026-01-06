@@ -1,6 +1,19 @@
 // main.rs - Complete example of multi-core initialization for KVM/QEMU x86_64
+//
+// ELF Execution Architecture:
+// 1. BSP reads ELF from ramfs and parses it to get entry point
+// 2. BSP creates shared ApTaskInfo structure with entry point address
+// 3. BSP passes pointer to ApTaskInfo via CpuData.task_info_ptr
+// 4. AP reads entry point from ApTaskInfo and executes it
+// 5. AP sets status field to signal execution progress:
+//    - 0 = idle
+//    - 1 = running
+//    - 2 = done
+// 6. BSP monitors status field to detect completion
 
 mod cpu_startup;
+mod dandelion_commons;
+mod elfloader;
 
 // Boot trampoline is in src/boot/ directory
 #[path = "boot/boot_trampoline_bindings.rs"]
@@ -11,10 +24,15 @@ mod boot_trampoline_bindings;
 mod ap;
 
 use ap::ap_entry;
+use ap::ApTaskInfo;
 use boot_trampoline_bindings::BootTrampoline;
 use core::arch::asm;
 use core::ptr;
 use cpu_startup::*;
+use elfloader::elf_parser::ParsedElf;
+use std::fs;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
 const DIRECTMAP_AREA_START: u64 = 0xffffff8000000000; // -512 GiB
@@ -42,12 +60,50 @@ fn main() {
     }
     println!("x2APIC enabled on BSP");
 
-    // Step 2: Get number of CPUs from ACPI (simplified - assumes 2 CPUs)
+    // Step 2: Load and parse ELF file
+    println!("\n=== Loading ELF file ===");
+    let elf_path = "/elf/test_elf_unikernel_x86_64_basic";
+    let elf_bytes = match fs::read(elf_path) {
+        Ok(bytes) => {
+            println!("✓ Read ELF file: {} bytes", bytes.len());
+            bytes
+        }
+        Err(e) => {
+            println!("✗ Failed to read ELF file '{}': {}", elf_path, e);
+            panic!("Cannot proceed without ELF file");
+        }
+    };
+
+    // Parse ELF to get entry point
+    let parsed_elf = match ParsedElf::new(&elf_bytes) {
+        Ok(elf) => {
+            println!("✓ ELF parsed successfully");
+            elf
+        }
+        Err(e) => {
+            println!("✗ Failed to parse ELF: {:?}", e);
+            panic!("Malformed ELF file");
+        }
+    };
+
+    let elf_entry_point = parsed_elf.get_entry_point();
+    println!("✓ ELF entry point: 0x{:x}", elf_entry_point);
+
+    // Allocate shared memory for AP task info
+    let ap_task_info = Arc::new(ApTaskInfo::new());
+    ap_task_info
+        .entry_point
+        .store(elf_entry_point as u64, Ordering::SeqCst);
+    let task_info_ptr = Arc::as_ptr(&ap_task_info) as u64;
+    println!("✓ AP task info at: 0x{:x}", task_info_ptr);
+    println!();
+
+    // Step 3: Get number of CPUs from ACPI (simplified - assumes 2 CPUs)
     // For debugging, only start 1 AP
     let cpu_count = 2; // BSP + 1 AP
     println!("Testing with {} CPUs (1 BSP + 1 AP)", cpu_count);
 
-    // Step 3: Setup boot trampoline
+    // Step 4: Setup boot trampoline
     // Use Unikraft's direct-map region to access physical memory
     println!("Setting up trampoline:");
     println!("  Physical address: 0x{:x}", TRAMPOLINE_PHYS_ADDR);
@@ -115,7 +171,7 @@ fn main() {
             let entry = ap_entry as *const () as u64;
             println!("  Entry address for CPU {}: 0x{:x}", i, entry);
 
-            if let Err(e) = trampoline.init_cpu(i as u32, apic_id, entry, stack) {
+            if let Err(e) = trampoline.init_cpu(i as u32, apic_id, entry, stack, task_info_ptr) {
                 panic!("Failed to initialize CPU {}: {}", i, e);
             }
             println!("Initialized CPU {} (APIC ID {})", i, apic_id);
@@ -167,10 +223,37 @@ fn main() {
         }
 
         println!("All CPUs started!");
+
+        // Monitor AP task execution
+        println!("\n=== Monitoring AP Task Execution ===");
+        for retry in 0..200 {
+            delay_ms(10);
+            let status = ap_task_info.status.load(Ordering::SeqCst);
+            match status {
+                0 => {
+                    if retry % 10 == 0 {
+                        println!("Waiting for AP to start ELF execution...");
+                    }
+                }
+                1 => {
+                    println!("✓ AP is executing ELF...");
+                }
+                2 => {
+                    println!("✓ AP completed ELF execution!");
+                    break;
+                }
+                _ => {
+                    println!("⚠ Unknown status: {}", status);
+                }
+            }
+            if retry == 199 {
+                println!("⚠ Timeout waiting for AP task completion");
+            }
+        }
     }
 
     // Main completes - the kernel will take over
-    println!("Main boot sequence complete!");
+    println!("\n=== Main boot sequence complete! ===");
 }
 
 /// Add identity mapping for low memory in page tables
