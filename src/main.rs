@@ -31,8 +31,6 @@ use core::ptr;
 use cpu_startup::*;
 use elfloader::elf_parser::ParsedElf;
 use std::fs;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
 const DIRECTMAP_AREA_START: u64 = 0xffffff8000000000; // -512 GiB
@@ -89,12 +87,14 @@ fn main() {
     let elf_entry_point = parsed_elf.get_entry_point();
     println!("✓ ELF entry point: 0x{:x}", elf_entry_point);
 
-    // Allocate shared memory for AP task info
-    let ap_task_info = Arc::new(ApTaskInfo::new());
-    ap_task_info
-        .entry_point
-        .store(elf_entry_point as u64, Ordering::SeqCst);
-    let task_info_ptr = Arc::as_ptr(&ap_task_info) as u64;
+    // Allocate shared memory for AP task info in static storage (not heap)
+    // Static variables are in the data segment and accessible by APs
+    static mut AP_TASK_INFO: ApTaskInfo = ApTaskInfo::new();
+    unsafe {
+        AP_TASK_INFO.write_entry_point(elf_entry_point as u64);
+    }
+
+    let task_info_ptr = unsafe { &AP_TASK_INFO as *const ApTaskInfo as u64 };
     println!("✓ AP task info at: 0x{:x}", task_info_ptr);
     println!();
 
@@ -209,7 +209,7 @@ fn main() {
                 delay_ms(10);
                 let state = trampoline.get_cpu_state(i);
                 if state != 0 {
-                    delay_ms(100);
+                    delay_ms(1000);
                     println!("  CPU {} came online! State: {}", i, state);
                     break;
                 }
@@ -228,7 +228,7 @@ fn main() {
         println!("\n=== Monitoring AP Task Execution ===");
         for retry in 0..200 {
             delay_ms(10);
-            let status = ap_task_info.status.load(Ordering::SeqCst);
+            let status = AP_TASK_INFO.read_status();
             match status {
                 0 => {
                     if retry % 10 == 0 {

@@ -1,13 +1,10 @@
 // ap.rs - Application Processor entry point and runtime initialization
-
-use super::ap_print::{ap_print, ap_print_hex, ap_print_u32};
 use crate::ap_println; // Macro is exported to crate root
 use crate::boot_trampoline_bindings;
 use crate::cpu_startup::x2apic_enable;
 use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
-use core::sync::atomic::Ordering;
 
 /// Entry point for Application Processors (APs)
 #[no_mangle]
@@ -30,65 +27,72 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         }
 
         // Debug: Send '@' after x2APIC enabled
-        asm!("out dx, al", in("al") b'@' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
+        // asm!("out dx, al", in("al") b'@' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         // Mark CPU as IDLE
         let state_ptr = &raw const cpu.state as *mut i32;
         ptr::write_volatile(state_ptr, 2); // LCPU_STATE_IDLE
 
         // Debug: Send '#' after state set
-        asm!("out dx, al", in("al") b'#' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
+        // asm!("out dx, al", in("al") b'#' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         // Initialize Rust runtime for this AP (TLS, etc.)
         let tlsp = match ap_runtime_init() {
             Ok(tls_ptr) => tls_ptr,
             Err(e) => {
-                ap_print("Failed to initialize runtime: ");
-                ap_print_u32(e as u32);
-                ap_print("\n");
+                ap_println!("Failed to initialize runtime: {}", e);
                 loop {
                     asm!("hlt");
                 }
             }
         };
 
-        ap_print("Runtime init complete\n");
+        ap_println!("Runtime init complete");
 
         // Use ap_println! macro which works without full runtime
         ap_println!("CPU {} online! APIC ID: {}", cpu_id, cpu.id);
         ap_println!("TLS base: 0x{:016x}", tlsp);
 
-        // Get task info from cpu_data
+        // Set up minimal exception handlers to catch ELF crashes
+        setup_exception_handlers();
+        ap_println!("Exception handlers installed");
+
+        // Read task info from shared memory
         let task_info_ptr = cpu.task_info_ptr as *const ApTaskInfo;
         if task_info_ptr.is_null() {
-            ap_print("ERROR: No task info provided\n");
+            ap_println!("ERROR: Task info pointer is null");
             loop {
                 asm!("hlt");
             }
         }
-
+        ap_println!("reading entry point from shared memory...");
         let task_info = &*task_info_ptr;
-        let elf_entry = task_info.entry_point.load(Ordering::SeqCst);
+        let elf_entry = task_info.read_entry_point();
+        ap_println!(
+            "Read ELF entry point from shared memory: 0x{:016x}",
+            elf_entry
+        );
 
         if elf_entry == 0 {
-            ap_print("ERROR: No ELF entry point set\n");
+            ap_println!("ERROR: No ELF entry point set");
             loop {
                 asm!("hlt");
             }
         }
 
-        ap_println!("Executing ELF at entry point: 0x{:016x}", elf_entry);
-
-        // Set status to running
-        task_info.status.store(1, Ordering::SeqCst);
+        // Mark task as running
+        task_info.write_status(1);
+        ap_println!("Task status set to RUNNING");
 
         // Execute the ELF entry point
         // Cast to function pointer and call it
-        let elf_fn: extern "C" fn() -> () = core::mem::transmute(elf_entry as usize);
-        elf_fn();
+        // let elf_fn: extern "C" fn() -> () = core::mem::transmute(elf_entry as usize);
+        // ap_println!("executing elf...");
+        // TODO elf is not PIE and needs to be loaded at specific address
+        // elf_fn();
 
         // Mark task as done
-        task_info.status.store(2, Ordering::SeqCst);
+        task_info.write_status(2);
         ap_println!("CPU {} completed ELF execution", cpu_id);
 
         // Wait for more work (simplified - just halt)
@@ -154,9 +158,7 @@ pub fn ap_runtime_init() -> Result<usize, i32> {
             options(nostack, preserves_flags)
         );
 
-        ap_print("TLS initialized at 0x");
-        ap_print_hex(tlsp as u64);
-        ap_print("\n");
+        ap_println!("TLS initialized at 0x{:016x}", tlsp);
 
         Ok(tlsp)
     }
@@ -181,5 +183,139 @@ pub fn alloc_aligned(size: usize, align: usize) -> Result<usize, i32> {
 
         TLS_OFFSET = offset_aligned + size;
         Ok(aligned)
+    }
+}
+
+/// IDT entry for exception handlers
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct IdtEntry {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    flags: u8,
+    offset_mid: u16,
+    offset_high: u32,
+    reserved: u32,
+}
+
+impl IdtEntry {
+    const fn new() -> Self {
+        Self {
+            offset_low: 0,
+            selector: 0,
+            ist: 0,
+            flags: 0,
+            offset_mid: 0,
+            offset_high: 0,
+            reserved: 0,
+        }
+    }
+
+    fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
+        let addr = handler as usize as u64;
+        self.offset_low = (addr & 0xFFFF) as u16;
+        self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
+        self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
+        self.selector = 0x08; // Code segment selector
+        self.ist = 0;
+        self.flags = 0x8E; // Present, Ring 0, Interrupt gate
+    }
+}
+
+#[repr(C, packed)]
+struct IdtDescriptor {
+    limit: u16,
+    base: u64,
+}
+
+static mut AP_IDT: [IdtEntry; 32] = [IdtEntry::new(); 32];
+
+unsafe fn setup_exception_handlers() {
+    // Set up handlers for common exceptions
+    AP_IDT[0].set_handler(exception_handler_0); // Divide by zero
+    AP_IDT[6].set_handler(exception_handler_6); // Invalid opcode
+    AP_IDT[8].set_handler(exception_handler_8); // Double fault
+    AP_IDT[13].set_handler(exception_handler_13); // General protection fault
+    AP_IDT[14].set_handler(exception_handler_14); // Page fault
+
+    let idt_desc = IdtDescriptor {
+        limit: (core::mem::size_of::<[IdtEntry; 32]>() - 1) as u16,
+        base: AP_IDT.as_ptr() as u64,
+    };
+
+    asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
+
+    // Verify IDT was loaded
+    let mut loaded_desc = IdtDescriptor { limit: 0, base: 0 };
+    asm!("sidt [{}]", in(reg) &mut loaded_desc, options(nostack, preserves_flags));
+
+    // Copy packed struct fields to avoid unaligned reference
+    let base = loaded_desc.base;
+    let limit = loaded_desc.limit;
+    ap_println!("IDT loaded at: 0x{:016x} limit: {}", base, limit);
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_0() {
+    ap_println!("\n!!! EXCEPTION #0: Divide by Zero !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_6() {
+    ap_println!("\n!!! EXCEPTION #6: Invalid Opcode !!!\n");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_8() {
+    ap_println!("\n!!! EXCEPTION #8: Double Fault !!!");
+    ap_println!("This means an exception occurred while handling another exception.");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_13() {
+    ap_println!("\n!!! EXCEPTION #13: General Protection Fault !!!");
+    // Read error code from stack
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!("Error code: 0x{:016x}", error_code);
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_14() {
+    ap_println!("\n!!! EXCEPTION #14: Page Fault !!!");
+    // Read CR2 (faulting address)
+    let fault_addr: u64;
+    asm!("mov {}, cr2", out(reg) fault_addr);
+    ap_println!("Fault address: 0x{:016x}", fault_addr);
+    // Read error code from stack
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!(
+        "Error code: 0x{:016x} (P={}, W={}, U={})",
+        error_code,
+        error_code & 1,
+        (error_code >> 1) & 1,
+        (error_code >> 2) & 1
+    );
+    loop {
+        asm!("cli");
+        asm!("hlt");
     }
 }

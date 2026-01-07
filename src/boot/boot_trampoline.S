@@ -439,40 +439,6 @@ jump_to_entry:
 	/* Copy CPU struct pointer from %rbp to %rdi (first argument for Rust) */
 	movq	%rbp, %rdi
 
-	/* Set up minimal IDT with page fault handler */
-	subq	$4096, %rsp
-	movq	%rsp, %rbx
-	
-	/* Clear IDT (256 entries * 16 bytes = 4096 bytes) */
-	movq	%rbx, %rcx
-	movq	$512, %r8
-.Lclear_idt:
-	movq	$0, (%rcx)
-	addq	$8, %rcx
-	decq	%r8
-	jnz	.Lclear_idt
-	
-	/* Set up page fault handler (vector 14) */
-	leaq	page_fault_handler(%rip), %rax
-	leaq	0xE0(%rbx), %rcx	/* Entry 14 * 16 bytes */
-	
-	movw	%ax, 0(%rcx)		/* offset_low */
-	movw	$0x08, 2(%rcx)		/* selector */
-	movb	$0, 4(%rcx)		/* IST */
-	movb	$0x8E, 5(%rcx)		/* type_attr: present, DPL=0, interrupt gate */
-	shrq	$16, %rax
-	movw	%ax, 6(%rcx)		/* offset_mid */
-	shrq	$16, %rax
-	movl	%eax, 8(%rcx)		/* offset_high */
-	
-	/* Load IDT */
-	subq	$16, %rsp
-	movw	$4095, (%rsp)		/* limit */
-	movq	%rbx, 2(%rsp)		/* base */
-	lidt	(%rsp)
-	addq	$16, %rsp
-	addq	$4096, %rsp
-
 	/* Align stack to 16-byte boundary (System V AMD64 ABI requirement) */
 	andq	$~0xf, %rsp
 
@@ -499,24 +465,6 @@ jump_to_entry:
 	movw	$0x3F8, %dx
 	outb	%al, %dx
 	jmp	fail_loop
-
-/* Minimal page fault handler - outputs 'F' and halts */
-page_fault_handler:
-	pushq	%rax
-	pushq	%rdx
-	
-	/* Output 'F' for page fault */
-	movb	$'F', %al
-	movw	$0x3F8, %dx
-	outb	%al, %dx
-	
-	popq	%rdx
-	popq	%rax
-	
-	/* Halt */
-	cli
-1:	hlt
-	jmp	1b
 
 fail:
 	movl	$LCPU_STATE_HALTED, LCPU_STATE_OFFSET(%rbp)
