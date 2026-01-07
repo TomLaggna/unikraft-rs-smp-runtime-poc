@@ -141,6 +141,11 @@ gdt64_user_cs:
 	.quad	GDT_DESC_CODE64_USER_VAL	/* 64-bit CS ring 3 (user) */
 gdt64_user_ds:
 	.quad	GDT_DESC_DATA64_USER_VAL	/* 64-bit DS ring 3 (user) */
+gdt64_tss:
+	/* TSS descriptor (16 bytes in 64-bit mode) */
+	/* Will be filled at runtime with TSS base address */
+	.quad	0x0000000000000000	/* TSS low: limit[15:0], base[15:0], base[23:16], type, flags */
+	.quad	0x0000000000000000	/* TSS high: base[63:32], reserved */
 gdt64_end:
 gdt64_ptr:
 	.word	gdt64_end - gdt64 - 1

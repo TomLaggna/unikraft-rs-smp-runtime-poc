@@ -269,6 +269,9 @@ unsafe fn setup_exception_handlers() {
     AP_TSS.rsp0 = kernel_stack;
     ap_println!("TSS RSP0 set to: 0x{:016x}", kernel_stack);
 
+    // Setup TSS descriptor in GDT
+    setup_tss_descriptor();
+
     // Set up handlers for common exceptions (DPL=0, kernel only)
     AP_IDT[0].set_handler(exception_handler_0, 0); // Divide by zero
     AP_IDT[6].set_handler(exception_handler_6, 0); // Invalid opcode
@@ -295,14 +298,49 @@ unsafe fn setup_exception_handlers() {
     let limit = loaded_desc.limit;
     ap_println!("IDT loaded at: 0x{:016x} limit: {}", base, limit);
 
-    // TODO: Load TSS once we add TSS descriptor to GDT in boot trampoline
-    // let tss_selector = 0x28; // Will be index 5 in GDT
-    // asm!("ltr {0:x}", in(reg) tss_selector, options(nostack, preserves_flags));
+    // Load TSS using LTR instruction
+    let tss_selector = boot_trampoline_bindings::GDT_SEL_TSS;
+    asm!("ltr {0:x}", in(reg) tss_selector, options(nostack, preserves_flags));
+    ap_println!("TSS loaded with selector: 0x{:04x}", tss_selector);
+}
+
+/// Setup TSS descriptor in the GDT
+/// TSS descriptor is 16 bytes in 64-bit mode (occupies 2 GDT entries)
+unsafe fn setup_tss_descriptor() {
+    let tss_base = &AP_TSS as *const Tss as u64;
+    let tss_limit = (core::mem::size_of::<Tss>() - 1) as u64;
+
+    // Get GDT base address
+    let mut gdt_desc = IdtDescriptor { limit: 0, base: 0 };
+    asm!("sgdt [{}]", in(reg) &mut gdt_desc, options(nostack, preserves_flags));
+
+    // TSS descriptor is at index 5 (offset 0x28)
+    let tss_desc_ptr = (gdt_desc.base + 0x28) as *mut u64;
+
+    // Build TSS descriptor (16 bytes = 2 u64 entries)
+    // Low qword: limit[15:0] | base[15:0] | base[23:16] | type=0x89 | limit[19:16] | base[31:24]
+    let low = (tss_limit & 0xFFFF)
+        | ((tss_base & 0xFFFF) << 16)
+        | ((tss_base & 0xFF0000) << 32)
+        | (0x89u64 << 40)  // Type: Available 64-bit TSS, Present
+        | (((tss_limit >> 16) & 0xF) << 48)
+        | ((tss_base & 0xFF000000) << 32);
+
+    // High qword: base[63:32] | reserved
+    let high = tss_base >> 32;
+
+    ptr::write_volatile(tss_desc_ptr, low);
+    ptr::write_volatile(tss_desc_ptr.offset(1), high);
+
+    ap_println!(
+        "TSS descriptor set at GDT+0x28, TSS base: 0x{:016x}",
+        tss_base
+    );
 }
 
 #[no_mangle]
 unsafe extern "C" fn exception_handler_0() {
-    ap_println!("\n!!! EXCEPTION #0: Divide by Zero !!!");
+    ap_println!("\n!!! EXCEPTION #0: Divide by Zero !!!\n");
     loop {
         asm!("cli");
         asm!("hlt");
