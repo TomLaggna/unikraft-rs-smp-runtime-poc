@@ -212,14 +212,15 @@ impl IdtEntry {
         }
     }
 
-    fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
+    fn set_handler(&mut self, handler: unsafe extern "C" fn(), dpl: u8) {
         let addr = handler as usize as u64;
         self.offset_low = (addr & 0xFFFF) as u16;
         self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
         self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
         self.selector = 0x08; // Code segment selector
         self.ist = 0;
-        self.flags = 0x8E; // Present, Ring 0, Interrupt gate
+        // Flags: Present (0x80) | DPL (dpl << 5) | Type (0x0E for interrupt gate)
+        self.flags = 0x80 | ((dpl & 0x3) << 5) | 0x0E;
     }
 }
 
@@ -229,18 +230,57 @@ struct IdtDescriptor {
     base: u64,
 }
 
-static mut AP_IDT: [IdtEntry; 32] = [IdtEntry::new(); 32];
+/// Task State Segment (TSS) for x86_64
+/// Used for stack switching when transitioning privilege levels (ring 3 -> ring 0)
+#[repr(C, packed)]
+struct Tss {
+    _reserved1: u32,
+    rsp0: u64, // Stack pointer for ring 0 (kernel)
+    rsp1: u64, // Stack pointer for ring 1 (unused)
+    rsp2: u64, // Stack pointer for ring 2 (unused)
+    _reserved2: u64,
+    ist: [u64; 7], // Interrupt Stack Table
+    _reserved3: u64,
+    _reserved4: u16,
+    iomap_base: u16, // I/O Map Base Address
+}
+
+static mut AP_IDT: [IdtEntry; 33] = [IdtEntry::new(); 33];
+
+// Static TSS for stack switching during ring transitions
+static mut AP_TSS: Tss = Tss {
+    _reserved1: 0,
+    rsp0: 0,
+    rsp1: 0,
+    rsp2: 0,
+    _reserved2: 0,
+    ist: [0; 7],
+    _reserved3: 0,
+    _reserved4: 0,
+    iomap_base: 104, // Size of TSS
+};
 
 unsafe fn setup_exception_handlers() {
-    // Set up handlers for common exceptions
-    AP_IDT[0].set_handler(exception_handler_0); // Divide by zero
-    AP_IDT[6].set_handler(exception_handler_6); // Invalid opcode
-    AP_IDT[8].set_handler(exception_handler_8); // Double fault
-    AP_IDT[13].set_handler(exception_handler_13); // General protection fault
-    AP_IDT[14].set_handler(exception_handler_14); // Page fault
+    // Get current stack pointer for kernel stack (RSP0)
+    let kernel_stack: u64;
+    asm!("mov {}, rsp", out(reg) kernel_stack);
+
+    // Initialize TSS with kernel stack
+    AP_TSS.rsp0 = kernel_stack;
+    ap_println!("TSS RSP0 set to: 0x{:016x}", kernel_stack);
+
+    // Set up handlers for common exceptions (DPL=0, kernel only)
+    AP_IDT[0].set_handler(exception_handler_0, 0); // Divide by zero
+    AP_IDT[6].set_handler(exception_handler_6, 0); // Invalid opcode
+    AP_IDT[8].set_handler(exception_handler_8, 0); // Double fault
+    AP_IDT[13].set_handler(exception_handler_13, 0); // General protection fault
+    AP_IDT[14].set_handler(exception_handler_14, 0); // Page fault
+
+    // User exit handler (interrupt 32) - DPL=3 (user accessible)
+    AP_IDT[32].set_handler(user_exit_handler, 3);
 
     let idt_desc = IdtDescriptor {
-        limit: (core::mem::size_of::<[IdtEntry; 32]>() - 1) as u16,
+        limit: (core::mem::size_of::<[IdtEntry; 33]>() - 1) as u16,
         base: AP_IDT.as_ptr() as u64,
     };
 
@@ -254,6 +294,10 @@ unsafe fn setup_exception_handlers() {
     let base = loaded_desc.base;
     let limit = loaded_desc.limit;
     ap_println!("IDT loaded at: 0x{:016x} limit: {}", base, limit);
+
+    // TODO: Load TSS once we add TSS descriptor to GDT in boot trampoline
+    // let tss_selector = 0x28; // Will be index 5 in GDT
+    // asm!("ltr {0:x}", in(reg) tss_selector, options(nostack, preserves_flags));
 }
 
 #[no_mangle]
@@ -314,6 +358,25 @@ unsafe extern "C" fn exception_handler_14() {
         (error_code >> 1) & 1,
         (error_code >> 2) & 1
     );
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+/// User exit handler (interrupt 32)
+/// Called when user space program executes INT 32 to exit
+/// This handler has DPL=3, allowing ring 3 (user space) to invoke it
+#[no_mangle]
+unsafe extern "C" fn user_exit_handler() {
+    ap_println!("\n=== USER EXIT (INT 32) ===");
+    ap_println!("User program requested exit");
+
+    // TODO: Mark task as completed in AP_TASK_INFO when implementing ELF execution
+    // extern { static mut AP_TASK_INFO: ApTaskInfo; }
+    // AP_TASK_INFO.write_status(2); // Status: done
+
+    // For now, just halt
     loop {
         asm!("cli");
         asm!("hlt");

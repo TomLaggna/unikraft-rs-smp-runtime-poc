@@ -138,9 +138,19 @@
 #define GDT_DESC_CODE32_VAL	0x00cf9a000000ffff	/* 32-bit code, readable, 4GB */
 #define GDT_DESC_DATA32_VAL	0x00cf92000000ffff	/* 32-bit data, writable, 4GB */
 
-/* 64-bit GDT descriptors */
-#define GDT_DESC_CODE64_VAL	0x00af9a000000ffff	/* 64-bit code, readable */
-#define GDT_DESC_DATA64_VAL	0x00af92000000ffff	/* 64-bit data, writable */
+/* 64-bit GDT descriptors - Ring 0 (kernel) */
+#define GDT_DESC_CODE64_VAL	0x00af9a000000ffff	/* 64-bit code, readable, DPL=0 */
+#define GDT_DESC_DATA64_VAL	0x00af92000000ffff	/* 64-bit data, writable, DPL=0 */
+
+/* 64-bit GDT descriptors - Ring 3 (user space) */
+#define GDT_DESC_CODE64_USER_VAL	0x00affa000000ffff	/* 64-bit code, readable, DPL=3 */
+#define GDT_DESC_DATA64_USER_VAL	0x00aff2000000ffff	/* 64-bit data, writable, DPL=3 */
+
+/* GDT Selector constants (index << 3 | RPL) */
+#define GDT_SEL_KERN_CODE\t0x08\t/* Kernel code segment (index 1, RPL=0) */
+#define GDT_SEL_KERN_DATA\t0x10\t/* Kernel data segment (index 2, RPL=0) */
+#define GDT_SEL_USER_CODE\t0x1B\t/* User code segment (index 3, RPL=3) */
+#define GDT_SEL_USER_DATA\t0x23\t/* User data segment (index 4, RPL=3) */
 
 /* ========================================================================== */
 /* LCPU Structure Offsets (must match Rust CpuData)                           */

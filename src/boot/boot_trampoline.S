@@ -134,9 +134,13 @@ gdt64:
 gdt64_null:
 	.quad	0x0000000000000000	/* null segment */
 gdt64_cs:
-	.quad	GDT_DESC_CODE64_VAL	/* 64-bit CS	*/
+	.quad	GDT_DESC_CODE64_VAL	/* 64-bit CS ring 0 */
 gdt64_ds:
-	.quad	GDT_DESC_DATA64_VAL	/* DS		*/
+	.quad	GDT_DESC_DATA64_VAL	/* 64-bit DS ring 0 */
+gdt64_user_cs:
+	.quad	GDT_DESC_CODE64_USER_VAL	/* 64-bit CS ring 3 (user) */
+gdt64_user_ds:
+	.quad	GDT_DESC_DATA64_USER_VAL	/* 64-bit DS ring 3 (user) */
 gdt64_end:
 gdt64_ptr:
 	.word	gdt64_end - gdt64 - 1

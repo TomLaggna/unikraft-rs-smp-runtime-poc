@@ -8,6 +8,13 @@
 
 use core::ptr;
 
+/// GDT Segment Selectors
+/// These match the GDT setup in boot_trampoline.S
+pub const GDT_SEL_KERN_CODE: u16 = 0x08; // Kernel code segment (ring 0)
+pub const GDT_SEL_KERN_DATA: u16 = 0x10; // Kernel data segment (ring 0)
+pub const GDT_SEL_USER_CODE: u16 = 0x1B; // User code segment (ring 3)
+pub const GDT_SEL_USER_DATA: u16 = 0x23; // User data segment (ring 3)
+
 /// Per-CPU data structure (must match boot_defs.h LCPU layout)
 /// Size: 64 bytes, aligned to 64-byte boundary
 #[repr(C, align(64))]
