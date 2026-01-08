@@ -14,6 +14,7 @@
 mod cpu_startup;
 mod dandelion_commons;
 mod elfloader;
+mod user_pagetable;
 
 // Boot trampoline is in src/boot/ directory
 #[path = "boot/boot_trampoline_bindings.rs"]
@@ -86,6 +87,92 @@ fn main() {
 
     let elf_entry_point = parsed_elf.get_entry_point();
     println!("✓ ELF entry point: 0x{:x}", elf_entry_point);
+
+    // ========================================================================
+    // TEST: User Space Manager (Dandelion Pattern)
+    // ========================================================================
+    println!("\n=== Testing User Space Manager (Dandelion Pattern) ===");
+
+    // Create a 64 MB user address space (reduced for 1GB RAM system)
+    const USER_SPACE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    let mut user_space = unsafe {
+        match user_pagetable::UserSpaceManager::new(USER_SPACE_SIZE) {
+            Ok(us) => us,
+            Err(e) => panic!("Failed to create user space: {}", e),
+        }
+    };
+
+    user_space.print_stats();
+    println!();
+
+    // Example: Map a small code region
+    // Allocate 64KB for user code in kernel space
+    let user_code_size = 64 * 1024;
+    let mut user_code_buf = vec![0u8; user_code_size];
+
+    // Write simple code pattern (NOP instructions)
+    for i in 0..user_code_size {
+        user_code_buf[i] = 0x90; // NOP
+    }
+
+    // Map it at virtual address 0x400000 (typical ELF base) in user space
+    let user_code_virt = 0x400000;
+    let user_code_kernel_virt = user_code_buf.as_ptr() as usize;
+
+    if let Err(e) = unsafe {
+        user_space.map_user_range(user_code_virt, user_code_kernel_virt, user_code_size, false)
+    } {
+        panic!("Failed to map user code: {}", e);
+    }
+
+    println!("✓ Mapped user code region:");
+    println!(
+        "  User virtual:   0x{:x} - 0x{:x}",
+        user_code_virt,
+        user_code_virt + user_code_size
+    );
+    println!(
+        "  Kernel virtual: 0x{:x} - 0x{:x}",
+        user_code_kernel_virt,
+        user_code_kernel_virt + user_code_size
+    );
+    println!();
+
+    // Example: Map user stack
+    let user_stack_size = 16 * 4096; // 64KB
+    let mut user_stack_buf = vec![0u8; user_stack_size];
+    // Place stack at end of 64MB address space (64MB - 64KB)
+    let user_stack_virt = USER_SPACE_SIZE - user_stack_size;
+    let user_stack_kernel_virt = user_stack_buf.as_ptr() as usize;
+
+    if let Err(e) = unsafe {
+        user_space.map_user_range(
+            user_stack_virt,
+            user_stack_kernel_virt,
+            user_stack_size,
+            true,
+        )
+    } {
+        panic!("Failed to map user stack: {}", e);
+    }
+
+    println!("✓ Mapped user stack:");
+    println!(
+        "  User virtual:   0x{:x} - 0x{:x}",
+        user_stack_virt,
+        user_stack_virt + user_stack_size
+    );
+    println!(
+        "  Kernel virtual: 0x{:x} - 0x{:x}",
+        user_stack_kernel_virt,
+        user_stack_kernel_virt + user_stack_size
+    );
+    println!();
+
+    println!(
+        "✓ User space ready! CR3 = 0x{:016x}\n",
+        user_space.get_cr3()
+    );
 
     // Allocate shared memory for AP task info in static storage (not heap)
     // Static variables are in the data segment and accessible by APs
