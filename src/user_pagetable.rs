@@ -231,11 +231,15 @@ fn set_range(
 ///
 /// Memory layout:
 /// ```
-/// High addresses (last_address)
+/// High addresses (buffer end)
 /// ├─ P4 table (PML4) - 1 page
 /// ├─ P3 table (PDPT) - 1 page  
 /// ├─ P2+P1 tables - multiple pages
-/// ├─ (Future: interrupt handlers, stack)
+/// ├─ Interrupt handler stack - N pages (RSP0 points here)
+/// ├─ IDT - 1 page (33 entries × 16 bytes)
+/// ├─ TSS - 104 bytes
+/// ├─ GDT - 80 bytes  
+/// ├─ Interrupt handlers - 1 page (assembly fault handler code)
 /// ↓
 /// Low addresses (0)
 /// └─ User code/data region
@@ -247,8 +251,20 @@ pub struct UserSpaceManager {
     last_address: usize,
     /// Physical address of PML4 (for CR3)
     p4_phys: u64,
-    /// Address where stack starts (grows down)
+    /// Address where stack starts (points below reserved memory structures)
     stack_start: usize,
+    /// Address where interrupt structures start (end of user-addressable space)
+    interrupt_start: usize,
+    /// Address where interrupt handler code page starts
+    interrupt_handler_code: usize,
+    /// Address of GDT in guest memory
+    gdt_address: usize,
+    /// Address of TSS in guest memory
+    tss_address: usize,
+    /// Address of IDT in guest memory
+    idt_address: usize,
+    /// Address where interrupt handler stack starts (for RSP0)
+    interrupt_stack: usize,
 }
 
 impl UserSpaceManager {
@@ -266,14 +282,35 @@ impl UserSpaceManager {
 
         let last_address = user_space_size;
 
+        // Constants for interrupt infrastructure (following Dandelion)
+        const GDT_SIZE: usize = 80; // 10 entries × 8 bytes (null + 2 kernel + 2 user + TSS)
+        const TSS_SIZE: usize = 104; // Standard TSS size
+        const IDT_ENTRIES: usize = 33; // Entries 0-32
+        const IDT_ENTRY_SIZE: usize = 16; // 16 bytes per entry in 64-bit mode
+        const INTERRUPT_STACK_PAGES: usize = 4; // 16KB stack for interrupt handlers
+
         // Calculate page table space needed
         let p2_table_number = last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
         let p1_table_number = p2_table_number * TABLE_SIZE;
         let page_table_pages = 1 + 1 + p2_table_number + p1_table_number; // p4 + p3 + p2s + p1s
         let page_table_bytes = page_table_pages << PAGE_SHIFT;
 
-        // Allocate buffer: user space + page tables + some headroom
-        let total_size = last_address + page_table_bytes + (16 << PAGE_SHIFT); // 16 pages headroom
+        // Calculate interrupt infrastructure space (allocated from high addresses downward)
+        let interrupt_handler_code_bytes = PAGE_SIZE; // 1 page for handler assembly
+        let gdt_bytes = GDT_SIZE;
+        let tss_bytes = TSS_SIZE;
+        let idt_bytes = IDT_ENTRIES * IDT_ENTRY_SIZE;
+        let interrupt_stack_bytes = INTERRUPT_STACK_PAGES << PAGE_SHIFT;
+
+        // Total space for interrupt infrastructure (before page tables)
+        let interrupt_total = interrupt_handler_code_bytes
+            + gdt_bytes
+            + tss_bytes
+            + idt_bytes
+            + interrupt_stack_bytes;
+
+        // Allocate buffer: user space + interrupt infra + page tables + headroom
+        let total_size = last_address + interrupt_total + page_table_bytes + (16 << PAGE_SHIFT);
         let mut guest_mem = vec![0u8; total_size];
 
         // CRITICAL: Force kernel to map all pages by touching each one
@@ -284,7 +321,7 @@ impl UserSpaceManager {
         }
         println!("All pages now mapped in kernel page tables");
 
-        // Page tables go at high addresses (working backwards from end)
+        // Allocate structures from high addresses working backwards
         let mut stack_start = total_size;
 
         // P4 table (PML4)
@@ -298,6 +335,63 @@ impl UserSpaceManager {
         // P2+P1 tables
         stack_start -= (p2_table_number + p1_table_number) << PAGE_SHIFT;
         let table_base = stack_start;
+
+        // Interrupt handler stack (RSP0 will point to top of this)
+        stack_start -= interrupt_stack_bytes;
+        let interrupt_stack = stack_start;
+
+        // IDT (aligned to 8-byte boundary for cache efficiency)
+        stack_start -= idt_bytes;
+        let idt_address = stack_start;
+
+        // TSS
+        stack_start -= tss_bytes;
+        let tss_address = stack_start;
+
+        // GDT
+        stack_start -= gdt_bytes;
+        let gdt_address = stack_start;
+
+        // Interrupt handler code page
+        stack_start -= interrupt_handler_code_bytes;
+        let interrupt_handler_code = stack_start;
+        let interrupt_start = interrupt_handler_code;
+
+        println!("\nUser space memory layout:");
+        println!(
+            "  User address space:      0x{:x} - 0x{:x}",
+            0, last_address
+        );
+        println!(
+            "  Interrupt structures:    0x{:x} - 0x{:x}",
+            interrupt_start,
+            interrupt_start + interrupt_total
+        );
+        println!(
+            "    Handler code:          0x{:x} (1 page)",
+            interrupt_handler_code
+        );
+        println!(
+            "    GDT:                   0x{:x} ({} bytes)",
+            gdt_address, gdt_bytes
+        );
+        println!(
+            "    TSS:                   0x{:x} ({} bytes)",
+            tss_address, tss_bytes
+        );
+        println!(
+            "    IDT:                   0x{:x} ({} bytes)",
+            idt_address, idt_bytes
+        );
+        println!(
+            "    Interrupt stack:       0x{:x} ({} pages)",
+            interrupt_stack, INTERRUPT_STACK_PAGES
+        );
+        println!(
+            "  Page tables:             0x{:x} - 0x{:x}",
+            table_base, stack_start
+        );
+        println!("  Buffer end:              0x{:x}\n", total_size);
 
         // Get physical addresses by translating each page table's virtual address
         let guest_mem_base_virt = guest_mem.as_ptr() as u64;
@@ -360,7 +454,13 @@ impl UserSpaceManager {
             guest_mem,
             last_address,
             p4_phys,
-            stack_start,
+            stack_start: interrupt_start, // Points to start of reserved memory
+            interrupt_start,
+            interrupt_handler_code,
+            gdt_address,
+            tss_address,
+            idt_address,
+            interrupt_stack,
         })
     }
 
@@ -428,12 +528,43 @@ impl UserSpaceManager {
         &mut self.guest_mem
     }
 
+    /// Get the address where interrupt handler code should be copied
+    pub fn get_interrupt_handler_code_address(&self) -> usize {
+        self.interrupt_handler_code
+    }
+
+    /// Get the GDT address in guest memory
+    pub fn get_gdt_address(&self) -> usize {
+        self.gdt_address
+    }
+
+    /// Get the TSS address in guest memory
+    pub fn get_tss_address(&self) -> usize {
+        self.tss_address
+    }
+
+    /// Get the IDT address in guest memory
+    pub fn get_idt_address(&self) -> usize {
+        self.idt_address
+    }
+
+    /// Get the interrupt stack top address (for TSS RSP0)
+    pub fn get_interrupt_stack_top(&self) -> usize {
+        self.interrupt_stack + (4 << PAGE_SHIFT) // Top of 4-page stack
+    }
+
     /// Print statistics
     pub fn print_stats(&self) {
         println!("User Space Manager:");
         println!("  User address space: 0x0 - 0x{:x}", self.last_address);
         println!("  Guest mem buffer: {} bytes", self.guest_mem.len());
         println!("  PML4 (CR3): 0x{:016x}", self.p4_phys);
-        println!("  Stack start: 0x{:x}", self.stack_start);
+        println!("  Stack start (reserved memory): 0x{:x}", self.stack_start);
+        println!("  Interrupt structures start: 0x{:x}", self.interrupt_start);
+        println!("    Handler code:   0x{:x}", self.interrupt_handler_code);
+        println!("    GDT:            0x{:x}", self.gdt_address);
+        println!("    TSS:            0x{:x}", self.tss_address);
+        println!("    IDT:            0x{:x}", self.idt_address);
+        println!("    Int stack top:  0x{:x}", self.get_interrupt_stack_top());
     }
 }
