@@ -178,6 +178,14 @@ fn main() {
     // Static variables are in the data segment and accessible by APs
     static mut AP_TASK_INFO: ApTaskInfo = ApTaskInfo::new();
     unsafe {
+        // Write user space CR3 to AP task info so AP can load user page tables
+        AP_TASK_INFO.write_user_cr3(user_space.get_cr3());
+        println!(
+            "✓ User CR3 written to AP task info: 0x{:016x}",
+            user_space.get_cr3()
+        );
+    }
+    unsafe {
         AP_TASK_INFO.write_entry_point(elf_entry_point as u64);
     }
 

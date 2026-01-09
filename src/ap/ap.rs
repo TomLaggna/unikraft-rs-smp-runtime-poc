@@ -6,6 +6,21 @@ use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
 
+/// Load user page tables into CR3
+///
+/// # Safety
+/// The cr3 value must point to a valid PML4 page table structure
+unsafe fn load_user_page_tables(cr3: u64) {
+    if cr3 == 0 {
+        ap_println!("WARNING: User CR3 is 0, not loading user page tables");
+        return;
+    }
+
+    ap_println!("Loading user page tables into CR3: 0x{:016x}", cr3);
+    asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
+    ap_println!("✓ User page tables loaded");
+}
+
 /// Entry point for Application Processors (APs)
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -> ! {
@@ -72,6 +87,15 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
             "Read ELF entry point from shared memory: 0x{:016x}",
             elf_entry
         );
+
+        // Read user space CR3 from shared memory
+        let user_cr3 = task_info.read_user_cr3();
+        ap_println!("User CR3: 0x{:016x}", user_cr3);
+
+        // // Load user page tables if CR3 is set
+        // if user_cr3 != 0 {
+        //     load_user_page_tables(user_cr3);
+        // }
 
         if elf_entry == 0 {
             ap_println!("ERROR: No ELF entry point set");

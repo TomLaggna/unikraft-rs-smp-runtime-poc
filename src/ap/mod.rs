@@ -16,16 +16,18 @@ pub use ap::ap_entry;
 #[repr(C, align(64))]
 pub struct ApTaskInfo {
     pub entry_point: u64, // Entry point address for AP to execute
+    pub user_cr3: u64,    // Physical address of user space PML4 (for CR3)
     pub status: u8,       // 0=idle, 1=running, 2=done
-    _padding: [u8; 55],   // Padding to 64 bytes (cache line)
+    _padding: [u8; 47],   // Padding to 64 bytes (cache line)
 }
 
 impl ApTaskInfo {
     pub const fn new() -> Self {
         Self {
             entry_point: 0,
+            user_cr3: 0,
             status: 0,
-            _padding: [0; 55],
+            _padding: [0; 47],
         }
     }
 
@@ -38,11 +40,27 @@ impl ApTaskInfo {
         }
     }
 
+    /// BSP writes user space CR3 before starting AP
+    pub fn write_user_cr3(&self, value: u64) {
+        unsafe {
+            let ptr = &raw const self.user_cr3 as *mut u64;
+            ptr::write_volatile(ptr, value);
+        }
+    }
+
     /// AP reads entry point after starting
     /// Inserts Acquire fence to ensure it sees BSP's writes
     pub fn read_entry_point(&self) -> u64 {
         unsafe {
             let ptr = &raw const self.entry_point as *const u64;
+            ptr::read_volatile(ptr)
+        }
+    }
+
+    /// AP reads user space CR3 after starting
+    pub fn read_user_cr3(&self) -> u64 {
+        unsafe {
+            let ptr = &raw const self.user_cr3 as *const u64;
             ptr::read_volatile(ptr)
         }
     }
