@@ -196,7 +196,7 @@ fn main() {
     println!("Kernel stack (for TSS.RSP0): 0x{:016x}", kernel_stack);
 
     // Setup all interrupt infrastructure
-    let _interrupt_config = unsafe {
+    let interrupt_config = unsafe {
         match user_space.setup_all_interrupt_infrastructure(
             handler_code,
             &handler_addresses,
@@ -208,6 +208,12 @@ fn main() {
         }
     };
 
+    // Get current kernel CR3 for returning from user space
+    let kernel_cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) kernel_cr3);
+    }
+
     // Allocate shared memory for AP task info in static storage (not heap)
     // Static variables are in the data segment and accessible by APs
     static mut AP_TASK_INFO: ApTaskInfo = ApTaskInfo::new();
@@ -217,6 +223,36 @@ fn main() {
         println!(
             "✓ User CR3 written to AP task info: 0x{:016x}",
             user_space.get_cr3()
+        );
+
+        // Write kernel CR3 for returning from user space
+        AP_TASK_INFO.write_kernel_cr3(kernel_cr3);
+        println!(
+            "✓ Kernel CR3 written to AP task info: 0x{:016x}",
+            kernel_cr3
+        );
+
+        // Write interrupt configuration
+        AP_TASK_INFO.write_interrupt_config(
+            interrupt_config.gdt_base,
+            interrupt_config.gdt_limit,
+            interrupt_config.idt_base,
+            interrupt_config.idt_limit,
+            interrupt_config.tss_base,
+            interrupt_config.tss_selector,
+        );
+        println!("✓ Interrupt config written to AP task info");
+        println!(
+            "  GDT: base=0x{:x}, limit={}",
+            interrupt_config.gdt_base, interrupt_config.gdt_limit
+        );
+        println!(
+            "  IDT: base=0x{:x}, limit={}",
+            interrupt_config.idt_base, interrupt_config.idt_limit
+        );
+        println!(
+            "  TSS: base=0x{:x}, selector=0x{:x}",
+            interrupt_config.tss_base, interrupt_config.tss_selector
         );
     }
     unsafe {
