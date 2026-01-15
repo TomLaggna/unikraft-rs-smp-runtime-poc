@@ -14,6 +14,7 @@
 mod cpu_startup;
 mod dandelion_commons;
 mod elfloader;
+mod user_handlers;
 mod user_pagetable;
 
 // Boot trampoline is in src/boot/ directory
@@ -139,10 +140,12 @@ fn main() {
     println!();
 
     // Example: Map user stack
+    // Stack must end BEFORE interrupt structures to avoid overlap
     let user_stack_size = 16 * 4096; // 64KB
     let mut user_stack_buf = vec![0u8; user_stack_size];
-    // Place stack at end of 64MB address space (64MB - 64KB)
-    let user_stack_virt = USER_SPACE_SIZE - user_stack_size;
+    // Place stack just below interrupt structures
+    let interrupt_virt_base = user_space.get_interrupt_virt_base();
+    let user_stack_virt = interrupt_virt_base - user_stack_size;
     let user_stack_kernel_virt = user_stack_buf.as_ptr() as usize;
 
     if let Err(e) = unsafe {
@@ -173,6 +176,37 @@ fn main() {
         "✓ User space ready! CR3 = 0x{:016x}\n",
         user_space.get_cr3()
     );
+
+    // Setup interrupt handlers for user space
+    println!("=== Setting up user space interrupt handlers ===");
+
+    // Get handler code and addresses from assembly
+    let handler_code = unsafe { user_handlers::get_handler_code() };
+    let handler_addresses = unsafe { user_handlers::get_handler_addresses() };
+    let handler_base = handler_addresses[0]; // Use first handler as base
+
+    println!("Handler code size: {} bytes", handler_code.len());
+    println!("Original handler base: 0x{:016x}", handler_base);
+
+    // Get current kernel stack for TSS.RSP0
+    let kernel_stack: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) kernel_stack);
+    }
+    println!("Kernel stack (for TSS.RSP0): 0x{:016x}", kernel_stack);
+
+    // Setup all interrupt infrastructure
+    let _interrupt_config = unsafe {
+        match user_space.setup_all_interrupt_infrastructure(
+            handler_code,
+            &handler_addresses,
+            handler_base,
+            kernel_stack,
+        ) {
+            Ok(config) => config,
+            Err(e) => panic!("Failed to setup interrupt infrastructure: {}", e),
+        }
+    };
 
     // Allocate shared memory for AP task info in static storage (not heap)
     // Static variables are in the data segment and accessible by APs

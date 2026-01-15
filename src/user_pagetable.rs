@@ -39,6 +39,76 @@ const HUGE_PAGE: usize = 1 << HUGE_PAGE_SHIFT; // 1GB
 const PML4_SHIFT: usize = 39;
 const TABLE_SIZE: usize = 512; // Each table has 512 entries
 
+/// Interrupt infrastructure configuration
+/// Shared between AP kernel setup and user space setup
+#[repr(C)]
+pub struct InterruptConfig {
+    /// Physical/virtual address of GDT
+    pub gdt_base: u64,
+    /// GDT limit (size - 1)
+    pub gdt_limit: u16,
+    /// Physical/virtual address of IDT
+    pub idt_base: u64,
+    /// IDT limit (size - 1)
+    pub idt_limit: u16,
+    /// Physical/virtual address of TSS
+    pub tss_base: u64,
+    /// TSS selector in GDT
+    pub tss_selector: u16,
+    /// Kernel stack for ring 0 (RSP0 in TSS)
+    pub kernel_stack: u64,
+    /// Interrupt handler stack (for IST entries)
+    pub interrupt_stack: u64,
+}
+
+impl InterruptConfig {
+    /// Create configuration from user space manager
+    pub fn from_user_space(manager: &UserSpaceManager, kernel_stack: u64) -> Self {
+        Self {
+            gdt_base: (manager.guest_mem.as_ptr() as u64) + manager.gdt_offset as u64,
+            gdt_limit: 80 - 1, // 10 entries × 8 bytes - 1
+            idt_base: (manager.guest_mem.as_ptr() as u64) + manager.idt_offset as u64,
+            idt_limit: (33 * 16) - 1, // 33 entries × 16 bytes - 1
+            tss_base: (manager.guest_mem.as_ptr() as u64) + manager.tss_offset as u64,
+            tss_selector: 0x28, // GDT offset for TSS
+            kernel_stack,
+            interrupt_stack: (manager.guest_mem.as_ptr() as u64)
+                + manager.get_interrupt_stack_top() as u64,
+        }
+    }
+
+    /// Load this configuration into CPU registers
+    ///
+    /// # Safety
+    /// Must be called with valid addresses that are mapped in current page tables
+    pub unsafe fn load_into_cpu(&self) {
+        use core::arch::asm;
+
+        // Load GDT
+        let gdt_desc = [
+            self.gdt_limit,
+            (self.gdt_base & 0xFFFF) as u16,
+            ((self.gdt_base >> 16) & 0xFFFF) as u16,
+            ((self.gdt_base >> 32) & 0xFFFF) as u16,
+            ((self.gdt_base >> 48) & 0xFFFF) as u16,
+        ];
+        asm!("lgdt [{}]", in(reg) &gdt_desc, options(readonly, nostack, preserves_flags));
+
+        // Load IDT
+        let idt_desc = [
+            self.idt_limit,
+            (self.idt_base & 0xFFFF) as u16,
+            ((self.idt_base >> 16) & 0xFFFF) as u16,
+            ((self.idt_base >> 32) & 0xFFFF) as u16,
+            ((self.idt_base >> 48) & 0xFFFF) as u16,
+        ];
+        asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
+
+        // Load TSS
+        asm!("ltr {0:x}", in(reg) self.tss_selector, options(nostack, preserves_flags));
+    }
+}
+
 /// Walk kernel page tables to translate virtual → physical
 /// Unikraft uses a direct-map region starting at 0xffffff8000000000
 unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
@@ -66,7 +136,7 @@ unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     let pml4_entry = ptr::read_volatile(pml4.add(pml4_idx as usize));
     // println!("  PML4[{}] = 0x{:016x}", pml4_idx, pml4_entry);
     if pml4_entry & 1 == 0 {
-        println!("  PML4 entry not present!");
+        println!("  PML4 entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
 
@@ -75,7 +145,7 @@ unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     let pdpt_entry = ptr::read_volatile(pdpt.add(pdpt_idx as usize));
     // println!("  PDPT[{}] = 0x{:016x}", pdpt_idx, pdpt_entry);
     if pdpt_entry & 1 == 0 {
-        println!("  PDPT entry not present!");
+        println!("  PDPT entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
     if pdpt_entry & (1 << 7) != 0 {
@@ -88,7 +158,7 @@ unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     let pd_entry = ptr::read_volatile(pd.add(pd_idx as usize));
     // println!("  PD[{}] = 0x{:016x}", pd_idx, pd_entry);
     if pd_entry & 1 == 0 {
-        println!("  PD entry not present!");
+        println!("  PD entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
     if pd_entry & (1 << 7) != 0 {
@@ -101,7 +171,7 @@ unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     let pt_entry = ptr::read_volatile(pt.add(pt_idx as usize));
     // println!("  PT[{}] = 0x{:016x}", pt_idx, pt_entry);
     if pt_entry & 1 == 0 {
-        println!("  PT entry not present!");
+        println!("  PT entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
 
@@ -247,7 +317,7 @@ fn set_range(
 pub struct UserSpaceManager {
     /// The entire "guest memory" buffer (owned)
     guest_mem: Vec<u8>,
-    /// Size of the user-addressable space
+    /// Size of the user-addressable space (excluding reserved interrupt structures)
     last_address: usize,
     /// Physical address of PML4 (for CR3)
     p4_phys: u64,
@@ -255,16 +325,18 @@ pub struct UserSpaceManager {
     stack_start: usize,
     /// Address where interrupt structures start (end of user-addressable space)
     interrupt_start: usize,
-    /// Address where interrupt handler code page starts
-    interrupt_handler_code: usize,
-    /// Address of GDT in guest memory
-    gdt_address: usize,
-    /// Address of TSS in guest memory
-    tss_address: usize,
-    /// Address of IDT in guest memory
-    idt_address: usize,
-    /// Address where interrupt handler stack starts (for RSP0)
-    interrupt_stack: usize,
+    /// BUFFER OFFSET: where interrupt handler code page starts in guest_mem
+    interrupt_handler_code_offset: usize,
+    /// BUFFER OFFSET: GDT location in guest_mem
+    gdt_offset: usize,
+    /// BUFFER OFFSET: TSS location in guest_mem
+    tss_offset: usize,
+    /// BUFFER OFFSET: IDT location in guest_mem
+    idt_offset: usize,
+    /// BUFFER OFFSET: interrupt handler stack location in guest_mem
+    interrupt_stack_offset: usize,
+    /// USER VIRTUAL ADDRESS: where interrupt structures are mapped in user space
+    interrupt_virt_base: usize,
 }
 
 impl UserSpaceManager {
@@ -280,7 +352,8 @@ impl UserSpaceManager {
             return Err("User space size must be < 512GB");
         }
 
-        let last_address = user_space_size;
+        // Page tables must cover the FULL user_space_size range
+        let total_size = user_space_size; // Everything fits in 64MB
 
         // Constants for interrupt infrastructure (following Dandelion)
         const GDT_SIZE: usize = 80; // 10 entries × 8 bytes (null + 2 kernel + 2 user + TSS)
@@ -289,131 +362,138 @@ impl UserSpaceManager {
         const IDT_ENTRY_SIZE: usize = 16; // 16 bytes per entry in 64-bit mode
         const INTERRUPT_STACK_PAGES: usize = 4; // 16KB stack for interrupt handlers
 
-        // Calculate page table space needed
-        let p2_table_number = last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
+        // Calculate page table space needed for FULL user_space_size
+        let p2_table_number = total_size.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
         let p1_table_number = p2_table_number * TABLE_SIZE;
         let page_table_pages = 1 + 1 + p2_table_number + p1_table_number; // p4 + p3 + p2s + p1s
         let page_table_bytes = page_table_pages << PAGE_SHIFT;
 
-        // Calculate interrupt infrastructure space (allocated from high addresses downward)
+        // Calculate sizes for interrupt infrastructure
         let interrupt_handler_code_bytes = PAGE_SIZE; // 1 page for handler assembly
         let gdt_bytes = GDT_SIZE;
         let tss_bytes = TSS_SIZE;
         let idt_bytes = IDT_ENTRIES * IDT_ENTRY_SIZE;
         let interrupt_stack_bytes = INTERRUPT_STACK_PAGES << PAGE_SHIFT;
 
-        // Total space for interrupt infrastructure (before page tables)
+        // Total space for interrupt infrastructure
         let interrupt_total = interrupt_handler_code_bytes
             + gdt_bytes
             + tss_bytes
             + idt_bytes
             + interrupt_stack_bytes;
 
-        // Allocate buffer: user space + interrupt infra + page tables + headroom
-        let total_size = last_address + interrupt_total + page_table_bytes + (16 << PAGE_SHIFT);
+        // Allocate buffer (exactly 64MB)
         let mut guest_mem = vec![0u8; total_size];
 
-        // CRITICAL: Force kernel to map all pages by touching each one
-        // Vec allocation uses lazy/demand paging - pages aren't mapped until first access
+        // Force kernel to map all pages (one write per page is sufficient)
         println!("Forcing kernel to map {} pages...", total_size / PAGE_SIZE);
         for page in 0..(total_size / PAGE_SIZE) {
-            guest_mem[page * PAGE_SIZE] = 0;
+            guest_mem[page * PAGE_SIZE] = 0; // Touch first byte of each page
         }
         println!("All pages now mapped in kernel page tables");
 
-        // Allocate structures from high addresses working backwards
-        let mut stack_start = total_size;
+        // ==================================================================
+        // ALLOCATION STRATEGY: Work backwards from end of 64MB buffer
+        // Layout: [User Space | Interrupt Structures | Page Tables]
+        // Buffer offset = Virtual address (everything in first 64MB)
+        // ==================================================================
 
-        // P4 table (PML4)
-        stack_start -= PAGE_SIZE;
-        let p4_address = stack_start;
+        let mut addr = total_size; // Start from end (64MB)
 
-        // P3 table (PDPT)
-        stack_start -= PAGE_SIZE;
-        let p3_address = stack_start;
+        // 1. Allocate page tables (from end, working backwards)
+        addr -= PAGE_SIZE;
+        let p4_offset = addr;
 
-        // P2+P1 tables
-        stack_start -= (p2_table_number + p1_table_number) << PAGE_SHIFT;
-        let table_base = stack_start;
+        addr -= PAGE_SIZE;
+        let p3_offset = addr;
 
-        // Interrupt handler stack (RSP0 will point to top of this)
-        stack_start -= interrupt_stack_bytes;
-        let interrupt_stack = stack_start;
+        let p2p1_size = (p2_table_number + p1_table_number) << PAGE_SHIFT;
+        addr -= p2p1_size;
+        let p2p1_offset = addr;
 
-        // IDT (aligned to 8-byte boundary for cache efficiency)
-        stack_start -= idt_bytes;
-        let idt_address = stack_start;
+        let page_tables_start = addr; // Where page tables begin
 
-        // TSS
-        stack_start -= tss_bytes;
-        let tss_address = stack_start;
+        // 2. Allocate interrupt structures (before page tables)
+        addr -= interrupt_stack_bytes;
+        let interrupt_stack_offset = addr;
 
-        // GDT
-        stack_start -= gdt_bytes;
-        let gdt_address = stack_start;
+        addr -= idt_bytes;
+        let idt_offset = addr;
 
-        // Interrupt handler code page
-        stack_start -= interrupt_handler_code_bytes;
-        let interrupt_handler_code = stack_start;
-        let interrupt_start = interrupt_handler_code;
+        addr -= tss_bytes;
+        let tss_offset = addr;
 
-        println!("\nUser space memory layout:");
+        addr -= gdt_bytes;
+        let gdt_offset = addr;
+
+        addr -= interrupt_handler_code_bytes;
+        let handler_code_offset = addr;
+
+        let interrupt_start = addr; // Where interrupt structures begin
+        let interrupt_virt_base = addr; // Same as offset (first 64MB)
+
+        // 3. User-addressable space: 0 to interrupt_start
+        let user_addressable_size = interrupt_start;
+        let last_address = total_size; // For page table calculations
+
+        println!("\n=== BUFFER LAYOUT (64MB total) ===");
+        println!("  Buffer size: {} bytes (0x{:x})", total_size, total_size);
+        println!("  Memory regions:");
         println!(
-            "  User address space:      0x{:x} - 0x{:x}",
-            0, last_address
-        );
-        println!(
-            "  Interrupt structures:    0x{:x} - 0x{:x}",
+            "    [0x0 - 0x{:x}] User space ({:.2} MB)",
             interrupt_start,
-            interrupt_start + interrupt_total
+            interrupt_start as f64 / (1024.0 * 1024.0)
         );
         println!(
-            "    Handler code:          0x{:x} (1 page)",
-            interrupt_handler_code
+            "    [0x{:x} - 0x{:x}] Interrupt structures ({} bytes)",
+            interrupt_start,
+            page_tables_start,
+            page_tables_start - interrupt_start
         );
         println!(
-            "    GDT:                   0x{:x} ({} bytes)",
-            gdt_address, gdt_bytes
+            "      Handler code:  0x{:x} ({} bytes)",
+            handler_code_offset, interrupt_handler_code_bytes
         );
         println!(
-            "    TSS:                   0x{:x} ({} bytes)",
-            tss_address, tss_bytes
+            "      GDT:           0x{:x} ({} bytes)",
+            gdt_offset, gdt_bytes
         );
         println!(
-            "    IDT:                   0x{:x} ({} bytes)",
-            idt_address, idt_bytes
+            "      TSS:           0x{:x} ({} bytes)",
+            tss_offset, tss_bytes
         );
         println!(
-            "    Interrupt stack:       0x{:x} ({} pages)",
-            interrupt_stack, INTERRUPT_STACK_PAGES
+            "      IDT:           0x{:x} ({} bytes)",
+            idt_offset, idt_bytes
         );
         println!(
-            "  Page tables:             0x{:x} - 0x{:x}",
-            table_base, stack_start
+            "      Int stack:     0x{:x} ({} bytes)",
+            interrupt_stack_offset, interrupt_stack_bytes
         );
-        println!("  Buffer end:              0x{:x}\n", total_size);
+        println!(
+            "    [0x{:x} - 0x{:x}] Page tables ({} bytes)",
+            page_tables_start, total_size, page_table_bytes
+        );
+        println!("      P2+P1:         0x{:x}", p2p1_offset);
+        println!("      P3:            0x{:x}", p3_offset);
+        println!("      P4:            0x{:x}\n", p4_offset);
 
         // Get physical addresses by translating each page table's virtual address
         let guest_mem_base_virt = guest_mem.as_ptr() as u64;
 
-        println!("Guest mem base virt: 0x{:016x}", guest_mem_base_virt);
-        println!("P4 offset in buffer: 0x{:x}", p4_address);
-
-        let p4_virt = guest_mem_base_virt + p4_address as u64;
-        println!("P4 virt: 0x{:016x}", p4_virt);
-
+        let p4_virt = guest_mem_base_virt + p4_offset as u64;
         let p4_phys =
             virt_to_phys(p4_virt).ok_or("Failed to translate P4 virtual address to physical")?;
 
-        let p3_virt = guest_mem_base_virt + p3_address as u64;
+        let p3_virt = guest_mem_base_virt + p3_offset as u64;
         let p3_phys =
             virt_to_phys(p3_virt).ok_or("Failed to translate P3 virtual address to physical")?;
 
-        let table_base_virt = guest_mem_base_virt + table_base as u64;
+        let p2p1_virt = guest_mem_base_virt + p2p1_offset as u64;
 
         // Set up P4 table
         {
-            let (_, p4_raw) = guest_mem.split_at_mut(p4_address);
+            let (_, p4_raw) = guest_mem.split_at_mut(p4_offset);
             let p4_table = u8_slice_to_u64_slice(&mut p4_raw[0..PAGE_SIZE]);
             p4_table.fill(0);
 
@@ -423,14 +503,14 @@ impl UserSpaceManager {
 
         // Set up P3 table
         {
-            let (_, p3_raw) = guest_mem.split_at_mut(p3_address);
+            let (_, p3_raw) = guest_mem.split_at_mut(p3_offset);
             let p3_table = u8_slice_to_u64_slice(&mut p3_raw[0..PAGE_SIZE]);
             p3_table.fill(0);
 
             // P3 entries point to P2 tables - translate each P2 table's address
             for p3_entry in 0..p2_table_number {
-                let p2_offset = p3_entry * (TABLE_SIZE + 1) * PAGE_SIZE;
-                let p2_virt = table_base_virt + p2_offset as u64;
+                let p2_offset_in_tables = p3_entry * (TABLE_SIZE + 1) * PAGE_SIZE;
+                let p2_virt = p2p1_virt + p2_offset_in_tables as u64;
                 let p2_phys = virt_to_phys(p2_virt)
                     .ok_or("Failed to translate P2 table virtual address to physical")?;
                 p3_table[p3_entry] = PDE64_ALL_ALLOWED | p2_phys;
@@ -439,8 +519,8 @@ impl UserSpaceManager {
 
         // Initialize P2 and P1 tables
         {
-            let (_, table_raw) = guest_mem.split_at_mut(table_base);
-            let table_array_len = (p2_table_number + p1_table_number) << PAGE_SHIFT;
+            let (_, table_raw) = guest_mem.split_at_mut(p2p1_offset);
+            let table_array_len = p2p1_size;
             let table_array = u8_slice_to_u64_slice(&mut table_raw[0..table_array_len]);
 
             // Zero out all P2 tables (P1 tables will be set up as needed by set_range)
@@ -452,15 +532,16 @@ impl UserSpaceManager {
 
         Ok(Self {
             guest_mem,
-            last_address,
+            last_address, // Total buffer size (64MB) for page table calculations
             p4_phys,
-            stack_start: interrupt_start, // Points to start of reserved memory
-            interrupt_start,
-            interrupt_handler_code,
-            gdt_address,
-            tss_address,
-            idt_address,
-            interrupt_stack,
+            stack_start: page_tables_start, // Where page tables start
+            interrupt_start,                // Where interrupt structures start
+            interrupt_handler_code_offset: handler_code_offset,
+            gdt_offset,
+            tss_offset,
+            idt_offset,
+            interrupt_stack_offset,
+            interrupt_virt_base, // Same as interrupt_start (buffer offset = virt addr)
         })
     }
 
@@ -530,41 +611,477 @@ impl UserSpaceManager {
 
     /// Get the address where interrupt handler code should be copied
     pub fn get_interrupt_handler_code_address(&self) -> usize {
-        self.interrupt_handler_code
+        self.interrupt_handler_code_offset
     }
 
     /// Get the GDT address in guest memory
     pub fn get_gdt_address(&self) -> usize {
-        self.gdt_address
+        self.gdt_offset
     }
 
     /// Get the TSS address in guest memory
     pub fn get_tss_address(&self) -> usize {
-        self.tss_address
+        self.tss_offset
     }
 
     /// Get the IDT address in guest memory
     pub fn get_idt_address(&self) -> usize {
-        self.idt_address
+        self.idt_offset
     }
 
     /// Get the interrupt stack top address (for TSS RSP0)
+    /// NOTE: This is in guest_mem, but for user→kernel transitions,
+    /// TSS.RSP0 should point to kernel stack instead!
     pub fn get_interrupt_stack_top(&self) -> usize {
-        self.interrupt_stack + (4 << PAGE_SHIFT) // Top of 4-page stack
+        self.interrupt_stack_offset + (4 << PAGE_SHIFT) // Top of 4-page stack
+    }
+
+    /// Get the user virtual address where interrupt structures are mapped
+    /// User code/stack must stay below this address
+    pub fn get_interrupt_virt_base(&self) -> usize {
+        self.interrupt_virt_base
+    }
+
+    /// Convert buffer offset to user virtual address for interrupt structures
+    /// Since interrupt structures are in first 64MB: buffer offset = virtual address!
+    fn offset_to_user_virt(&self, offset: usize) -> usize {
+        // For first 64MB of buffer, offset IS the virtual address
+        offset
+    }
+
+    /// Map interrupt infrastructure into user page tables
+    /// This makes GDT/TSS/IDT/handlers accessible when user CR3 is loaded
+    ///
+    /// Maps only interrupt structures (NOT page tables for security)
+    /// Split into executable (handler code) and non-executable (rest)
+    pub unsafe fn map_interrupt_infrastructure(&mut self) -> Result<(), &'static str> {
+        println!("Mapping interrupt infrastructure into user page tables...");
+
+        // Calculate where page tables start (work backwards from end of 64MB)
+        let p2_table_number = self.last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
+        let p1_table_number = p2_table_number * TABLE_SIZE;
+        let table_base = self.last_address - ((p2_table_number + p1_table_number) << PAGE_SHIFT);
+
+        // Interrupt structures: from interrupt_start to table_base (NOT to last_address!)
+        let interrupt_structures_end = table_base;
+
+        println!(
+            "  Interrupt structures: 0x{:x} - 0x{:x}",
+            self.interrupt_start, interrupt_structures_end
+        );
+        println!(
+            "  Page tables (NOT mapped): 0x{:x} - 0x{:x}",
+            table_base, self.last_address
+        );
+
+        // Kernel virtual address = guest_mem base + buffer offset
+        let guest_mem_base_virt = self.guest_mem.as_ptr() as usize;
+        let guest_mem_base_virt_u64 = guest_mem_base_virt as u64;
+        let table_base_virt = guest_mem_base_virt_u64 + table_base as u64;
+
+        // println!("  DEBUG: guest_mem base = 0x{:x}", guest_mem_base_virt);
+        // println!("  DEBUG: guest_mem len = {} (0x{:x})", self.guest_mem.len(), self.guest_mem.len());
+        // println!("  DEBUG: table_base offset = 0x{:x}", table_base);
+        // println!("  DEBUG: table_base_virt = 0x{:x}", table_base_virt);
+
+        let (_, table_raw) = self.guest_mem.split_at_mut(table_base);
+        let table_array_len = (p2_table_number + p1_table_number) << PAGE_SHIFT;
+        let table_array = u8_slice_to_u64_slice(&mut table_raw[0..table_array_len]);
+
+        // Map 1: Handler code page (EXECUTABLE, ring 0 only)
+        let handler_code_end = self.interrupt_handler_code_offset + PAGE_SIZE;
+        println!(
+            "  Mapping handler code: 0x{:x} - 0x{:x} (EXECUTABLE)",
+            self.interrupt_handler_code_offset, handler_code_end
+        );
+
+        let handler_flags = PDE64_PRESENT | PDE64_RW; // Ring 0 only, no USER bit
+
+        // println!(
+        //     "  DEBUG: handler offset = 0x{:x}",
+        //     self.interrupt_handler_code_offset
+        // );
+        // println!(
+        //     "  DEBUG: guest_mem_base (for set_range) = 0x{:x}",
+        //     guest_mem_base_virt
+        // );
+
+        // set_range adds page_offset to kernel_virt_start, so pass base, not base+offset!
+        set_range(
+            table_array,
+            table_base_virt,
+            self.interrupt_handler_code_offset,
+            handler_code_end,
+            handler_flags,
+            guest_mem_base_virt, // Pass BASE, set_range will add offset
+            0,
+        )?;
+
+        // Map 2: GDT/TSS/IDT/Int stack (NON-EXECUTABLE, ring 0 only)
+        if handler_code_end < interrupt_structures_end {
+            println!(
+                "  Mapping GDT/TSS/IDT/stack: 0x{:x} - 0x{:x} (NON-EXEC)",
+                handler_code_end, interrupt_structures_end
+            );
+
+            let structures_flags = PDE64_PRESENT | PDE64_RW; // Ring 0 only
+
+            // set_range adds page_offset to kernel_virt_start, so pass base!
+            set_range(
+                table_array,
+                table_base_virt,
+                handler_code_end,
+                interrupt_structures_end,
+                structures_flags,
+                guest_mem_base_virt, // Pass BASE, set_range will add offset
+                0,
+            )?;
+        }
+
+        println!("✓ Interrupt infrastructure mapped (page tables excluded)");
+        Ok(())
+    }
+
+    /// Setup GDT in guest memory
+    /// Returns the virtual address where GDT was placed
+    pub fn setup_gdt(&mut self) -> Result<usize, &'static str> {
+        println!("Setting up GDT at 0x{:x}", self.gdt_offset);
+
+        let gdt_slice = &mut self.guest_mem[self.gdt_offset..self.gdt_offset + 80];
+
+        // Helper to write a segment descriptor (8 bytes)
+        let write_segment = |dest: &mut [u8], privilege_level: u8, segment_type: u8| {
+            // segment_type: 10 (0xA) = code, 2 = data
+            // Code segment: executable, readable
+            // Data segment: writable
+            let descriptor_type = 1; // 1 for code/data
+            let code_64_bit = 1; // 64-bit mode
+
+            dest[0] = 0xFF; // Limit low
+            dest[1] = 0xFF; // Limit high
+            dest[2..4].fill(0); // Base low (unused in 64-bit)
+            dest[4] = 0; // Base mid
+            dest[5] = (1 << 7) | (privilege_level << 5) | (descriptor_type << 4) | segment_type;
+            dest[6] = (1 << 7) | ((code_64_bit as u8) << 5) | 0xF; // Granularity + 64-bit + limit high
+            dest[7] = 0; // Base high
+        };
+
+        // Entry 0: Null descriptor
+        gdt_slice[0..8].fill(0);
+
+        // Entry 1 (0x08): Kernel code segment (ring 0, executable)
+        write_segment(&mut gdt_slice[8..16], 0, 0xA);
+
+        // Entry 2 (0x10): Kernel data segment (ring 0, writable)
+        write_segment(&mut gdt_slice[16..24], 0, 0x2);
+
+        // Entry 3 (0x18): User code segment (ring 3, executable)
+        write_segment(&mut gdt_slice[24..32], 3, 0xA);
+
+        // Entry 4 (0x20): User data segment (ring 3, writable)
+        write_segment(&mut gdt_slice[32..40], 3, 0x2);
+
+        // Entry 5/6 (0x28-0x2F): TSS descriptor (16 bytes, filled by setup_tss)
+        gdt_slice[40..56].fill(0);
+
+        println!("✓ GDT configured (80 bytes)");
+        Ok(self.gdt_offset)
+    }
+
+    /// Setup TSS in guest memory
+    ///
+    /// # Arguments
+    /// * `kernel_stack_top` - Physical/kernel virtual address for RSP0 (used for ring 3→0 transition)
+    ///
+    /// Returns the virtual address where TSS was placed
+    pub fn setup_tss(&mut self, kernel_stack_top: u64) -> Result<usize, &'static str> {
+        println!(
+            "Setting up TSS at 0x{:x}, RSP0=0x{:x}",
+            self.tss_offset, kernel_stack_top
+        );
+        // Calculate IST1 value before borrowing guest_mem
+        let ist1 = self.get_interrupt_stack_top() as u64;
+        // Clear TSS area (104 bytes)
+        let tss_slice = &mut self.guest_mem[self.tss_offset..self.tss_offset + 104];
+        tss_slice.fill(0);
+
+        // TSS structure layout (x86_64):
+        // 0x00: reserved (4 bytes)
+        // 0x04: RSP0 (8 bytes) - stack for ring 0
+        // 0x0C: RSP1 (8 bytes)
+        // 0x14: RSP2 (8 bytes)
+        // 0x1C: reserved (8 bytes)
+        // 0x24: IST1-7 (7 × 8 bytes)
+        // 0x5C: reserved (8 bytes)
+        // 0x64: reserved (2 bytes)
+        // 0x66: I/O map base (2 bytes)
+
+        // Set RSP0 for privilege level transitions (ring 3 → ring 0)
+        tss_slice[4..12].copy_from_slice(&kernel_stack_top.to_le_bytes());
+
+        // Set IST[0] for critical exceptions (double fault, etc.)
+        tss_slice[0x24..0x2C].copy_from_slice(&ist1.to_le_bytes());
+
+        // Set I/O map base to TSS size (no I/O permission bitmap)
+        tss_slice[0x66..0x68].copy_from_slice(&104u16.to_le_bytes());
+
+        // Now update the TSS descriptor in the GDT
+        // TSS descriptor is at GDT offset 0x28 (entry 5), 16 bytes
+        let tss_limit = 103u64; // TSS size - 1
+
+        // Get physical address of TSS for the descriptor
+        let guest_mem_base = self.guest_mem.as_ptr() as u64;
+        let tss_kernel_virt = guest_mem_base + self.tss_offset as u64;
+        let tss_phys = unsafe {
+            virt_to_phys(tss_kernel_virt)
+                .ok_or("Failed to translate TSS virtual address to physical")?
+        };
+
+        let gdt_tss_desc = &mut self.guest_mem[self.gdt_offset + 40..self.gdt_offset + 56];
+
+        // Build TSS descriptor (16 bytes in 64-bit mode)
+        // Low qword: limit[15:0] | base[15:0] | base[23:16] | type=0x89 | limit[19:16] | base[31:24]
+        let low = (tss_limit & 0xFFFF)
+            | ((tss_phys & 0xFFFF) << 16)
+            | ((tss_phys & 0xFF0000) << 32)
+            | (0x89u64 << 40)  // Type: Available 64-bit TSS (0x9), Present (0x8)
+            | (((tss_limit >> 16) & 0xF) << 48)
+            | ((tss_phys & 0xFF000000) << 32);
+
+        // High qword: base[63:32] | reserved
+        let high = tss_phys >> 32;
+
+        gdt_tss_desc[0..8].copy_from_slice(&low.to_le_bytes());
+        gdt_tss_desc[8..16].copy_from_slice(&high.to_le_bytes());
+
+        println!("✓ TSS configured, descriptor updated in GDT");
+        Ok(self.tss_offset)
+    }
+
+    /// Setup IDT in guest memory
+    ///
+    /// # Arguments
+    /// * `handler_addresses` - Array of handler virtual addresses in guest_mem
+    ///
+    /// Returns the virtual address where IDT was placed
+    pub fn setup_idt(&mut self, handler_addresses: &[u64; 33]) -> Result<usize, &'static str> {
+        println!("Setting up IDT at 0x{:x}", self.idt_offset);
+
+        let idt_slice = &mut self.guest_mem[self.idt_offset..self.idt_offset + 33 * 16];
+
+        // Helper to write an IDT entry (16 bytes)
+        let write_idt_entry = |dest: &mut [u8], handler_addr: u64, dpl: u8, ist: u8| {
+            let addr_bytes = handler_addr.to_le_bytes();
+
+            // Offset low (bits 0-15)
+            dest[0] = addr_bytes[0];
+            dest[1] = addr_bytes[1];
+
+            // Segment selector (0x08 = kernel code segment)
+            dest[2] = 0x08;
+            dest[3] = 0x00;
+
+            // IST (Interrupt Stack Table) - bits 0-2
+            dest[4] = ist & 0x7;
+
+            // Type and attributes:
+            // Present (bit 7) | DPL (bits 5-6) | Type (bits 0-4)
+            // Type: 0xE = interrupt gate (disables interrupts), 0xF = trap gate
+            let gate_type = 0xE; // Interrupt gate
+            dest[5] = 0x80 | ((dpl & 0x3) << 5) | gate_type;
+
+            // Offset middle (bits 16-31)
+            dest[6] = addr_bytes[2];
+            dest[7] = addr_bytes[3];
+
+            // Offset high (bits 32-63)
+            dest[8] = addr_bytes[4];
+            dest[9] = addr_bytes[5];
+            dest[10] = addr_bytes[6];
+            dest[11] = addr_bytes[7];
+
+            // Reserved
+            dest[12..16].fill(0);
+        };
+
+        // Setup all 33 IDT entries
+        for i in 0..33 {
+            let offset = i * 16;
+            let handler_addr = handler_addresses[i];
+
+            // DPL = 3 for INT 32 (user accessible), DPL = 0 for all others
+            let dpl = if i == 32 { 3 } else { 0 };
+
+            // IST = 1 for double fault (entry 8), 0 for others
+            let ist = if i == 8 { 1 } else { 0 };
+
+            write_idt_entry(&mut idt_slice[offset..offset + 16], handler_addr, dpl, ist);
+        }
+
+        println!("✓ IDT configured (33 entries)");
+        Ok(self.idt_offset)
+    }
+
+    /// Copy interrupt handler code to guest memory
+    ///
+    /// # Arguments
+    /// * `handler_code` - Assembly code for fault handlers
+    ///
+    /// Returns the starting buffer offset of handlers
+    pub fn install_handlers(&mut self, handler_code: &[u8]) -> Result<usize, &'static str> {
+        if handler_code.len() > PAGE_SIZE {
+            return Err("Handler code exceeds one page");
+        }
+
+        let dest = &mut self.guest_mem[self.interrupt_handler_code_offset
+            ..self.interrupt_handler_code_offset + handler_code.len()];
+        dest.copy_from_slice(handler_code);
+
+        println!(
+            "✓ Installed {} bytes of handler code at buffer offset 0x{:x}",
+            handler_code.len(),
+            self.interrupt_handler_code_offset
+        );
+
+        Ok(self.interrupt_handler_code_offset)
+    }
+
+    /// Calculate handler addresses as USER VIRTUAL ADDRESSES
+    ///
+    /// Takes the original handler addresses (from linking) and adjusts them
+    /// to USER VIRTUAL ADDRESSES where they will be mapped in user space.
+    ///
+    /// # Arguments
+    /// * `original_addresses` - Handler addresses as linked in kernel
+    /// * `original_base` - Base address of handlers in original location
+    ///
+    /// Returns adjusted addresses as USER VIRTUAL ADDRESSES for IDT entries
+    pub fn calculate_handler_addresses(
+        &self,
+        original_addresses: &[u64; 33],
+        original_base: u64,
+    ) -> [u64; 33] {
+        // Calculate where handlers will be mapped in user space
+        let handler_user_virt_base = self.offset_to_user_virt(self.interrupt_handler_code_offset);
+
+        let mut adjusted = [0u64; 33];
+        for i in 0..33 {
+            // Calculate offset from original base
+            let offset = original_addresses[i] - original_base;
+            // Add offset to user virtual base (where they're mapped in user space)
+            adjusted[i] = handler_user_virt_base as u64 + offset;
+        }
+
+        adjusted
+    }
+
+    /// Get interrupt configuration for loading into CPU
+    ///
+    /// # Arguments
+    /// * `kernel_stack` - Kernel stack address for RSP0 (ring 3→0 transitions)
+    pub fn get_interrupt_config(&self, kernel_stack: u64) -> InterruptConfig {
+        InterruptConfig::from_user_space(self, kernel_stack)
+    }
+
+    /// Switch CR3 from user page tables back to kernel page tables
+    ///
+    /// # Safety
+    /// Must be called from interrupt handler running at ring 0 with user CR3 loaded
+    pub unsafe fn switch_to_kernel_cr3(kernel_cr3: u64) {
+        use core::arch::asm;
+        asm!("mov cr3, {}", in(reg) kernel_cr3, options(nostack, preserves_flags));
+    }
+
+    /// Setup all interrupt infrastructure in one call
+    ///
+    /// This is a convenience method that:
+    /// 1. Installs handler code in guest_mem
+    /// 2. Calculates adjusted handler addresses
+    /// 3. Sets up GDT
+    /// 4. Sets up TSS with kernel stack
+    /// 5. Sets up IDT with handlers
+    /// 6. Maps interrupt infrastructure in user page tables
+    ///
+    /// # Arguments
+    /// * `handler_code` - Raw handler code bytes
+    /// * `handler_addresses` - Original handler addresses (as linked)
+    /// * `handler_base` - Base address of handlers in original location
+    /// * `kernel_stack` - Kernel stack for TSS.RSP0
+    ///
+    /// # Returns
+    /// InterruptConfig for loading into CPU
+    pub unsafe fn setup_all_interrupt_infrastructure(
+        &mut self,
+        handler_code: &[u8],
+        handler_addresses: &[u64; 33],
+        handler_base: u64,
+        kernel_stack: u64,
+    ) -> Result<InterruptConfig, &'static str> {
+        println!("\n=== Setting up interrupt infrastructure ===");
+
+        // 1. Install handlers
+        self.install_handlers(handler_code)?;
+
+        // 2. Calculate adjusted addresses
+        let adjusted_addresses = self.calculate_handler_addresses(handler_addresses, handler_base);
+        println!("✓ Handler addresses adjusted for guest_mem");
+
+        // 3. Setup GDT
+        self.setup_gdt()?;
+
+        // 4. Setup TSS
+        self.setup_tss(kernel_stack)?;
+
+        // 5. Setup IDT
+        self.setup_idt(&adjusted_addresses)?;
+
+        // 6. Map interrupt infrastructure
+        self.map_interrupt_infrastructure()?;
+
+        println!("=== Interrupt infrastructure ready ===\n");
+
+        Ok(self.get_interrupt_config(kernel_stack))
     }
 
     /// Print statistics
     pub fn print_stats(&self) {
-        println!("User Space Manager:");
-        println!("  User address space: 0x0 - 0x{:x}", self.last_address);
-        println!("  Guest mem buffer: {} bytes", self.guest_mem.len());
-        println!("  PML4 (CR3): 0x{:016x}", self.p4_phys);
-        println!("  Stack start (reserved memory): 0x{:x}", self.stack_start);
-        println!("  Interrupt structures start: 0x{:x}", self.interrupt_start);
-        println!("    Handler code:   0x{:x}", self.interrupt_handler_code);
-        println!("    GDT:            0x{:x}", self.gdt_address);
-        println!("    TSS:            0x{:x}", self.tss_address);
-        println!("    IDT:            0x{:x}", self.idt_address);
-        println!("    Int stack top:  0x{:x}", self.get_interrupt_stack_top());
+        println!("\n=== User Space Manager Summary ===");
+        println!(
+            "  Virtual address space:  0x0 - 0x{:x} ({} MB)",
+            self.last_address,
+            self.last_address >> 20
+        );
+        println!(
+            "  Buffer size:            {} bytes ({} MB)",
+            self.guest_mem.len(),
+            self.guest_mem.len() >> 20
+        );
+        println!("  PML4 (CR3):             0x{:016x}", self.p4_phys);
+        println!("\n  Memory layout:");
+        println!(
+            "    User space:           0x0 - 0x{:x} ({:.2} MB)",
+            self.interrupt_start,
+            self.interrupt_start as f64 / (1024.0 * 1024.0)
+        );
+        println!(
+            "    Interrupt structures: 0x{:x} - 0x{:x}",
+            self.interrupt_start, self.stack_start
+        );
+        println!(
+            "      Handler code:       0x{:x}",
+            self.interrupt_handler_code_offset
+        );
+        println!("      GDT:                0x{:x}", self.gdt_offset);
+        println!("      TSS:                0x{:x}", self.tss_offset);
+        println!("      IDT:                0x{:x}", self.idt_offset);
+        println!(
+            "      Int stack:          0x{:x} (top: 0x{:x})",
+            self.interrupt_stack_offset,
+            self.get_interrupt_stack_top()
+        );
+        println!(
+            "    Page tables:          0x{:x} - 0x{:x}",
+            self.stack_start, self.last_address
+        );
     }
 }
