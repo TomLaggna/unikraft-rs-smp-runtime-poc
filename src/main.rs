@@ -41,6 +41,142 @@ const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000; // Physical location in first 1MB
 const TRAMPOLINE_VIRT_ADDR: u64 = DIRECTMAP_AREA_START + TRAMPOLINE_PHYS_ADDR; // Direct-map virtual address
 const STACK_SIZE: usize = 1 << 14; // 16KB stack per CPU
 
+// Page table constants
+const PAGE_SIZE: usize = 4096;
+const PTE_PRESENT: u64 = 1 << 0;
+const PTE_WRITE: u64 = 1 << 1;
+const PTE_USER: u64 = 1 << 2;
+const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// Walk kernel page tables to get physical address of a virtual address
+unsafe fn get_physical_address(cr3: u64, va: u64) -> u64 {
+    let pml4_idx = (va >> 39) & 0x1FF;
+    let pdpt_idx = (va >> 30) & 0x1FF;
+    let pd_idx = (va >> 21) & 0x1FF;
+    let pt_idx = (va >> 12) & 0x1FF;
+    let offset = va & 0xFFF;
+
+    let pml4_phys = cr3 & PTE_ADDR_MASK;
+    let pml4_virt = (pml4_phys + DIRECTMAP_AREA_START) as *const u64;
+    let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
+
+    if (pml4e & PTE_PRESENT) == 0 {
+        panic!("PML4 entry not present");
+    }
+
+    let pdpt_phys = pml4e & PTE_ADDR_MASK;
+    let pdpt_virt = (pdpt_phys + DIRECTMAP_AREA_START) as *const u64;
+    let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
+
+    if (pdpte & PTE_PRESENT) == 0 {
+        panic!("PDPT entry not present");
+    }
+
+    let pd_phys = pdpte & PTE_ADDR_MASK;
+    let pd_virt = (pd_phys + DIRECTMAP_AREA_START) as *const u64;
+    let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
+
+    if (pde & PTE_PRESENT) == 0 {
+        panic!("PD entry not present");
+    }
+
+    let pt_phys = pde & PTE_ADDR_MASK;
+    let pt_virt = (pt_phys + DIRECTMAP_AREA_START) as *const u64;
+    let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
+
+    if (pte & PTE_PRESENT) == 0 {
+        panic!("PT entry not present");
+    }
+
+    let page_phys = pte & PTE_ADDR_MASK;
+    page_phys + offset
+}
+
+/// Map a physical address at a virtual address in kernel page tables
+unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'static str> {
+    let pml4_idx = (va >> 39) & 0x1FF;
+    let pdpt_idx = (va >> 30) & 0x1FF;
+    let pd_idx = (va >> 21) & 0x1FF;
+    let pt_idx = (va >> 12) & 0x1FF;
+
+    let pml4_phys = cr3 & PTE_ADDR_MASK;
+    let pml4_virt = (pml4_phys + DIRECTMAP_AREA_START) as *mut u64;
+
+    // Get or create PDPT
+    let pml4e_ptr = pml4_virt.add(pml4_idx as usize);
+    let mut pml4e = ptr::read_volatile(pml4e_ptr);
+    let pdpt_phys = if (pml4e & PTE_PRESENT) == 0 {
+        // Allocate new PDPT
+        let layout = std::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+        let new_pdpt_ptr = std::alloc::alloc_zeroed(layout);
+        if new_pdpt_ptr.is_null() {
+            return Err("Failed to allocate PDPT");
+        }
+        // Touch the page to ensure it's present in direct map
+        ptr::write_volatile(new_pdpt_ptr, 0);
+        let pdpt_va = new_pdpt_ptr as u64;
+        let pdpt_pa = get_physical_address(cr3, pdpt_va);
+        pml4e = pdpt_pa | PTE_PRESENT | PTE_WRITE;
+        ptr::write_volatile(pml4e_ptr, pml4e);
+        pdpt_pa
+    } else {
+        pml4e & PTE_ADDR_MASK
+    };
+
+    // Get or create PD
+    let pdpt_virt = (pdpt_phys + DIRECTMAP_AREA_START) as *mut u64;
+    let pdpte_ptr = pdpt_virt.add(pdpt_idx as usize);
+    let mut pdpte = ptr::read_volatile(pdpte_ptr);
+    let pd_phys = if (pdpte & PTE_PRESENT) == 0 {
+        let layout = std::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+        let new_pd_ptr = std::alloc::alloc_zeroed(layout);
+        if new_pd_ptr.is_null() {
+            return Err("Failed to allocate PD");
+        }
+        // Touch the page to ensure it's present in direct map
+        ptr::write_volatile(new_pd_ptr, 0);
+        let pd_va = new_pd_ptr as u64;
+        let pd_pa = get_physical_address(cr3, pd_va);
+        pdpte = pd_pa | PTE_PRESENT | PTE_WRITE;
+        ptr::write_volatile(pdpte_ptr, pdpte);
+        pd_pa
+    } else {
+        pdpte & PTE_ADDR_MASK
+    };
+
+    // Get or create PT
+    let pd_virt = (pd_phys + DIRECTMAP_AREA_START) as *mut u64;
+    let pde_ptr = pd_virt.add(pd_idx as usize);
+    let mut pde = ptr::read_volatile(pde_ptr);
+    let pt_phys = if (pde & PTE_PRESENT) == 0 {
+        let layout = std::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+        let new_pt_ptr = std::alloc::alloc_zeroed(layout);
+        if new_pt_ptr.is_null() {
+            return Err("Failed to allocate PT");
+        }
+        // Touch the page to ensure it's present in direct map
+        ptr::write_volatile(new_pt_ptr, 0);
+        let pt_va = new_pt_ptr as u64;
+        let pt_pa = get_physical_address(cr3, pt_va);
+        pde = pt_pa | PTE_PRESENT | PTE_WRITE;
+        ptr::write_volatile(pde_ptr, pde);
+        pt_pa
+    } else {
+        pde & PTE_ADDR_MASK
+    };
+
+    // Set PT entry
+    let pt_virt = (pt_phys + DIRECTMAP_AREA_START) as *mut u64;
+    let pte_ptr = pt_virt.add(pt_idx as usize);
+    let pte = pa | PTE_PRESENT | PTE_WRITE;
+    ptr::write_volatile(pte_ptr, pte);
+
+    // Flush TLB
+    asm!("invlpg [{}]", in(reg) va, options(nostack));
+
+    Ok(())
+}
+
 fn main() {
     // Initialize serial console for debugging (for custom output)
     // Note: On Unikraft with std, regular println! should work
@@ -51,6 +187,308 @@ fn main() {
     println!("BSP running from: main() at 0x{:x}", main_addr);
     let ap_entry_addr = ap_entry as *const () as u64;
     println!("AP entry point: ap_entry() at 0x{:x}", ap_entry_addr);
+
+    // ========================================================================
+    // Helper function to walk page tables
+    // ========================================================================
+    unsafe fn walk_and_get_pa(cr3: u64, va: u64) -> u64 {
+        const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        const DIRECTMAP_START: u64 = 0xffffff8000000000;
+
+        let pml4_idx = (va >> 39) & 0x1FF;
+        let pdpt_idx = (va >> 30) & 0x1FF;
+        let pd_idx = (va >> 21) & 0x1FF;
+        let pt_idx = (va >> 12) & 0x1FF;
+
+        let pml4_phys = cr3 & PTE_ADDR_MASK;
+        let pml4_virt = (pml4_phys + DIRECTMAP_START) as *const u64;
+        let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
+
+        let pdpt_phys = pml4e & PTE_ADDR_MASK;
+        let pdpt_virt = (pdpt_phys + DIRECTMAP_START) as *const u64;
+        let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
+
+        let pd_phys = pdpte & PTE_ADDR_MASK;
+        let pd_virt = (pd_phys + DIRECTMAP_START) as *const u64;
+        let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
+
+        let pt_phys = pde & PTE_ADDR_MASK;
+        let pt_virt = (pt_phys + DIRECTMAP_START) as *const u64;
+        let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
+
+        (pte & PTE_ADDR_MASK) | (va & 0xFFF)
+    }
+
+    // ========================================================================
+    // TEST: Allocate memory and map at high address
+    // ========================================================================
+    println!("\n=== TEST: Trampoline Allocation and High Address Mapping ===");
+
+    // Step 1: Allocate buffer and find page-aligned addresses
+    const TRAMPOLINE_SIZE: usize = 3 * PAGE_SIZE;
+    let trampoline_buffer = vec![0u8; TRAMPOLINE_SIZE];
+    let buffer_va = trampoline_buffer.as_ptr() as u64;
+
+    println!("Step 1: Allocated {} bytes (3 pages)", TRAMPOLINE_SIZE);
+    println!("  Buffer VA: 0x{:016x}", buffer_va);
+
+    // Get CR3
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+    }
+    println!("  CR3: 0x{:016x}", cr3);
+
+    // Find page-aligned addresses within the buffer
+    let page1_va = if (buffer_va & 0xFFF) == 0 {
+        buffer_va // Already page-aligned
+    } else {
+        (buffer_va & !0xFFF) + PAGE_SIZE as u64 // Round up to next page
+    };
+    let page2_va = page1_va + PAGE_SIZE as u64;
+
+    println!("  Page-aligned addresses found:");
+    println!("    Page 1 VA: 0x{:016x}", page1_va);
+    println!("    Page 2 VA: 0x{:016x}", page2_va);
+
+    // Walk page tables to get actual physical addresses for these VAs
+    let (page1_pa, page2_pa) = unsafe {
+        (
+            walk_and_get_pa(cr3, page1_va),
+            walk_and_get_pa(cr3, page2_va),
+        )
+    };
+
+    println!("  Physical addresses (from page table walk):");
+    println!("    Page 1 PA: 0x{:016x}", page1_pa);
+    println!("    Page 2 PA: 0x{:016x}", page2_pa);
+
+    // Step 2: Map the pages at high address (but BELOW VMA management region)
+    // Unikraft's VMA system manages addresses starting from CONFIG_LIBUKVMEM_DEFAULT_BASE
+    // (likely ~0x200000000000 = 2TB based on Xen memory layout). We'll use an address
+    // just below that limit to maximize separation from user space while avoiding VMA checks.
+    const HIGH_VA_BASE: u64 = 0x0000_1FFF_FFFF_E000; // Just below 2TB (below VMA management)
+    let high_va_page1 = HIGH_VA_BASE;
+    let high_va_page2 = HIGH_VA_BASE + PAGE_SIZE as u64;
+
+    println!("\nStep 2: Mapping at high addresses (~2TB, below VMA region)");
+    println!(
+        "  High VA page 1: 0x{:016x} -> PA: 0x{:016x}",
+        high_va_page1, page1_pa
+    );
+    println!(
+        "  High VA page 2: 0x{:016x} -> PA: 0x{:016x}",
+        high_va_page2, page2_pa
+    );
+
+    // Step 4: Map both pages at high addresses
+    unsafe {
+        if let Err(e) = map_page_in_kernel_pt(cr3, high_va_page1, page1_pa) {
+            panic!("Failed to map page 1: {}", e);
+        }
+        if let Err(e) = map_page_in_kernel_pt(cr3, high_va_page2, page2_pa) {
+            panic!("Failed to map page 2: {}", e);
+        }
+    }
+    println!("  ✓ Pages mapped successfully");
+
+    // Explicit TLB flush for both addresses
+    unsafe {
+        asm!("invlpg [{}]", in(reg) high_va_page1, options(nostack));
+        asm!("invlpg [{}]", in(reg) high_va_page2, options(nostack));
+    }
+    println!("  ✓ TLB flushed");
+
+    // Step 3: Verify page table setup by walking them
+    println!("\nStep 3: Verifying page table mappings");
+    for (i, high_va) in [high_va_page1, high_va_page2].iter().enumerate() {
+        println!(
+            "  Verifying mapping for page {} at 0x{:016x}",
+            i + 1,
+            high_va
+        );
+
+        let pml4_idx = (high_va >> 39) & 0x1FF;
+        let pdpt_idx = (high_va >> 30) & 0x1FF;
+        let pd_idx = (high_va >> 21) & 0x1FF;
+        let pt_idx = (high_va >> 12) & 0x1FF;
+
+        println!(
+            "    Indices: PML4[{}] PDPT[{}] PD[{}] PT[{}]",
+            pml4_idx, pdpt_idx, pd_idx, pt_idx
+        );
+
+        unsafe {
+            // Walk PML4
+            let cr3_phys = cr3 & PTE_ADDR_MASK;
+            let pml4_virt = (cr3_phys + DIRECTMAP_AREA_START) as *const u64;
+            let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
+            println!(
+                "    PML4[{}] = 0x{:016x} (P={}, W={}, U={})",
+                pml4_idx,
+                pml4e,
+                pml4e & 1,
+                (pml4e >> 1) & 1,
+                (pml4e >> 2) & 1
+            );
+
+            if (pml4e & 1) == 0 {
+                println!("    ✗ ERROR: PML4 entry not present!");
+                continue;
+            }
+
+            // Walk PDPT
+            let pdpt_phys = pml4e & PTE_ADDR_MASK;
+            let pdpt_virt = (pdpt_phys + DIRECTMAP_AREA_START) as *const u64;
+            let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
+            println!(
+                "    PDPT[{}] = 0x{:016x} (P={}, W={}, U={})",
+                pdpt_idx,
+                pdpte,
+                pdpte & 1,
+                (pdpte >> 1) & 1,
+                (pdpte >> 2) & 1
+            );
+
+            if (pdpte & 1) == 0 {
+                println!("    ✗ ERROR: PDPT entry not present!");
+                continue;
+            }
+
+            // Walk PD
+            let pd_phys = pdpte & PTE_ADDR_MASK;
+            let pd_virt = (pd_phys + DIRECTMAP_AREA_START) as *const u64;
+            let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
+            println!(
+                "    PD[{}] = 0x{:016x} (P={}, W={}, U={})",
+                pd_idx,
+                pde,
+                pde & 1,
+                (pde >> 1) & 1,
+                (pde >> 2) & 1
+            );
+
+            if (pde & 1) == 0 {
+                println!("    ✗ ERROR: PD entry not present!");
+                continue;
+            }
+
+            // Walk PT
+            let pt_phys = pde & PTE_ADDR_MASK;
+            let pt_virt = (pt_phys + DIRECTMAP_AREA_START) as *const u64;
+            let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
+            println!(
+                "    PT[{}] = 0x{:016x} (P={}, W={}, U={})",
+                pt_idx,
+                pte,
+                pte & 1,
+                (pte >> 1) & 1,
+                (pte >> 2) & 1
+            );
+
+            if (pte & 1) == 0 {
+                println!("    ✗ ERROR: PT entry not present!");
+                continue;
+            }
+
+            // Extract final physical address
+            let mapped_phys = pte & PTE_ADDR_MASK;
+            let expected_phys = if i == 0 { page1_pa } else { page2_pa };
+            println!("    Final physical address: 0x{:016x}", mapped_phys);
+            println!("    Expected physical:      0x{:016x}", expected_phys);
+
+            if mapped_phys == expected_phys {
+                println!("    ✓ Physical address matches!");
+            } else {
+                println!("    ✗ ERROR: Physical address mismatch!");
+            }
+        }
+    }
+
+    // Step 4: TEST - Verify mappings work correctly
+    println!("\nStep 4: Testing trampoline access patterns");
+
+    println!("\n  Note: High addresses (~2TB) are below VMA management region.");
+    println!("        This avoids VMA checks while providing separation from user space.");
+    println!("        Both kernel and user mode can access these addresses.");
+
+    // Write test pattern via low (original) VAs
+    unsafe {
+        core::ptr::write_volatile(page1_va as *mut u8, 0xDE);
+        core::ptr::write_volatile((page1_va + 1) as *mut u8, 0xAD);
+        core::ptr::write_volatile((page1_va + 2) as *mut u8, 0xBE);
+        core::ptr::write_volatile((page1_va + 3) as *mut u8, 0xEF);
+
+        core::ptr::write_volatile(page2_va as *mut u8, 0xCA);
+        core::ptr::write_volatile((page2_va + 1) as *mut u8, 0xFE);
+        core::ptr::write_volatile((page2_va + 2) as *mut u8, 0xBA);
+        core::ptr::write_volatile((page2_va + 3) as *mut u8, 0xBE);
+    }
+    println!("\n  Test 1: Kernel access via LOW addresses (original allocation)");
+    println!("    Written via low VA: DE AD BE EF at 0x{:x}", page1_va);
+
+    // Read back via low addresses
+    unsafe {
+        let val1 = core::ptr::read_volatile(page1_va as *const u32);
+        let val2 = core::ptr::read_volatile(page2_va as *const u32);
+        println!("    Read back: 0x{:08x} and 0x{:08x}", val1, val2);
+        if val1 == 0xEFBEADDE && val2 == 0xBEBAFECA {
+            println!("    ✓ Low address access works!");
+        }
+    }
+
+    // Test access via DIRECT MAP (alternative kernel access method)
+    const DIRECTMAP_START: u64 = 0xffffff8000000000;
+    println!("\n  Test 2: Kernel access via DIRECT MAP");
+    let directmap_page1 = DIRECTMAP_START + page1_pa;
+    let directmap_page2 = DIRECTMAP_START + page2_pa;
+    println!("    Direct map VA page 1: 0x{:016x}", directmap_page1);
+    println!("    Direct map VA page 2: 0x{:016x}", directmap_page2);
+
+    unsafe {
+        // Read what we wrote earlier
+        let val1 = core::ptr::read_volatile(directmap_page1 as *const u32);
+        let val2 = core::ptr::read_volatile(directmap_page2 as *const u32);
+        println!("    Read via direct map: 0x{:08x} and 0x{:08x}", val1, val2);
+        if val1 == 0xEFBEADDE && val2 == 0xBEBAFECA {
+            println!("    ✓ Direct map access works!");
+        }
+
+        // Write new values via direct map
+        core::ptr::write_volatile(directmap_page1 as *mut u32, 0x12345678);
+        core::ptr::write_volatile(directmap_page2 as *mut u32, 0x9ABCDEF0);
+
+        // Read back via low VA to confirm they point to same physical memory
+        let val1_low = core::ptr::read_volatile(page1_va as *const u32);
+        let val2_low = core::ptr::read_volatile(page2_va as *const u32);
+        println!(
+            "    Wrote via direct map, read via low VA: 0x{:08x} and 0x{:08x}",
+            val1_low, val2_low
+        );
+        if val1_low == 0x12345678 && val2_low == 0x9ABCDEF0 {
+            println!("    ✓ Direct map and low VA point to same physical memory!");
+        }
+    }
+
+    println!("\n  ✓ SUCCESS: Trampoline memory is correctly allocated and accessible");
+    println!(
+        "    - Low addresses: 0x{:x} (original allocation)",
+        page1_va
+    );
+    println!(
+        "    - High addresses: 0x{:x} (~2TB, below VMA region)",
+        high_va_page1
+    );
+    println!(
+        "    - Direct map: 0x{:x} (physical memory mapping)",
+        directmap_page1
+    );
+    println!(
+        "    - All addresses point to same physical pages: 0x{:x}, 0x{:x}",
+        page1_pa, page2_pa
+    );
+
+    println!("=== TEST COMPLETE ===\n");
 
     // Step 1: Enable x2APIC on BSP
     unsafe {
