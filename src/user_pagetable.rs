@@ -315,12 +315,16 @@ fn set_range(
 /// └─ User code/data region
 /// ```
 pub struct UserSpaceManager {
-    /// The entire "guest memory" buffer (owned)
+    /// The entire "guest memory" buffer (owned) - may have padding at start for alignment
     guest_mem: Vec<u8>,
+    /// Offset to page-aligned region within guest_mem
+    guest_mem_aligned_offset: usize,
     /// Size of the user-addressable space (excluding reserved interrupt structures)
     last_address: usize,
-    /// Physical address of PML4 (for CR3)
-    p4_phys: u64,
+    /// Physical address of PML4 (for CR3) - validated page-aligned
+    p4_pa: u64,
+    /// BUFFER OFFSET: P4 (PML4) table location in guest_mem
+    p4_offset: usize,
     /// Address where stack starts (points below reserved memory structures)
     stack_start: usize,
     /// Address where interrupt structures start (end of user-addressable space)
@@ -337,6 +341,16 @@ pub struct UserSpaceManager {
     interrupt_stack_offset: usize,
     /// USER VIRTUAL ADDRESS: where interrupt structures are mapped in user space
     interrupt_virt_base: usize,
+    /// BUFFER OFFSET: P3 table for trampoline mappings (~2TB region)
+    trampoline_p3_offset: usize,
+    /// BUFFER OFFSET: P2 table for trampoline mappings
+    trampoline_p2_offset: usize,
+    /// BUFFER OFFSET: P1 table for trampoline mappings
+    trampoline_p1_offset: usize,
+    /// Physical addresses of trampoline page tables (validated page-aligned at init)
+    trampoline_p3_pa: u64,
+    trampoline_p2_pa: u64,
+    trampoline_p1_pa: u64,
 }
 
 impl UserSpaceManager {
@@ -382,15 +396,57 @@ impl UserSpaceManager {
             + idt_bytes
             + interrupt_stack_bytes;
 
-        // Allocate buffer (exactly 64MB)
-        let mut guest_mem = vec![0u8; total_size];
+        // Allocate buffer: 64MB + 1 page to ensure we can find a page-aligned region
+        let allocation_size = total_size + PAGE_SIZE;
+        let mut raw_allocation = vec![0u8; allocation_size];
 
-        // Force kernel to map all pages (one write per page is sufficient)
-        println!("Forcing kernel to map {} pages...", total_size / PAGE_SIZE);
+        // Find the first page-aligned address within the allocation
+        let raw_ptr = raw_allocation.as_ptr() as usize;
+        let alignment_offset = if raw_ptr & (PAGE_SIZE - 1) == 0 {
+            0 // Already aligned
+        } else {
+            PAGE_SIZE - (raw_ptr & (PAGE_SIZE - 1)) // Offset to next page boundary
+        };
+
+        println!(
+            "  Raw allocation at 0x{:016x}, alignment offset: 0x{:x}",
+            raw_ptr, alignment_offset
+        );
+
+        // Create a slice starting at the aligned offset
+        let guest_mem = &mut raw_allocation[alignment_offset..alignment_offset + total_size];
+        let guest_mem_kva = guest_mem.as_ptr() as u64;
+
+        // Verify virtual alignment
+        if guest_mem_kva & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err("guest_mem is not page-aligned in virtual address space!");
+        }
+        println!(
+            "  guest_mem at KVA 0x{:016x} (page-aligned ✓)",
+            guest_mem_kva
+        );
+
+        // Force kernel to map all pages FIRST (one write per page is sufficient)
+        // This ensures virt_to_phys() will work on all addresses
+        println!(
+            "  Forcing kernel to map {} pages...",
+            total_size / PAGE_SIZE
+        );
         for page in 0..(total_size / PAGE_SIZE) {
             guest_mem[page * PAGE_SIZE] = 0; // Touch first byte of each page
         }
-        println!("All pages now mapped in kernel page tables");
+        println!("  All pages now mapped in kernel page tables ✓");
+
+        // NOW check physical alignment (after pages are mapped)
+        let guest_mem_pa_check = virt_to_phys(guest_mem_kva)
+            .ok_or("Failed to translate guest_mem base to physical address")?;
+        if guest_mem_pa_check & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err("guest_mem is not page-aligned in PHYSICAL address space!");
+        }
+        println!(
+            "  guest_mem at PA  0x{:016x} (page-aligned ✓)",
+            guest_mem_pa_check
+        );
 
         // ==================================================================
         // ALLOCATION STRATEGY: Work backwards from end of 64MB buffer
@@ -404,6 +460,17 @@ impl UserSpaceManager {
         addr -= PAGE_SIZE;
         let p4_offset = addr;
 
+        // Validate p4_offset is page-aligned and within bounds
+        assert_eq!(
+            p4_offset & (PAGE_SIZE - 1),
+            0,
+            "P4 offset must be page-aligned"
+        );
+        assert!(
+            p4_offset + PAGE_SIZE <= total_size,
+            "P4 extends beyond guest_mem"
+        );
+
         addr -= PAGE_SIZE;
         let p3_offset = addr;
 
@@ -411,9 +478,22 @@ impl UserSpaceManager {
         addr -= p2p1_size;
         let p2p1_offset = addr;
 
-        let page_tables_start = addr; // Where page tables begin
+        let page_tables_start = addr; // Where main page tables begin
 
-        // 2. Allocate interrupt structures (before page tables)
+        // 1.5. Allocate trampoline page tables (P3/P2/P1 for ~2TB mapping)
+        // These are separate from main page tables to avoid complexity
+        addr -= PAGE_SIZE;
+        let trampoline_p1_offset = addr;
+
+        addr -= PAGE_SIZE;
+        let trampoline_p2_offset = addr;
+
+        addr -= PAGE_SIZE;
+        let trampoline_p3_offset = addr;
+
+        let trampoline_tables_start = addr;
+
+        // 2. Allocate interrupt structures (before trampoline tables)
         addr -= interrupt_stack_bytes;
         let interrupt_stack_offset = addr;
 
@@ -447,8 +527,8 @@ impl UserSpaceManager {
         println!(
             "    [0x{:x} - 0x{:x}] Interrupt structures ({} bytes)",
             interrupt_start,
-            page_tables_start,
-            page_tables_start - interrupt_start
+            trampoline_tables_start,
+            trampoline_tables_start - interrupt_start
         );
         println!(
             "      Handler code:  0x{:x} ({} bytes)",
@@ -471,7 +551,14 @@ impl UserSpaceManager {
             interrupt_stack_offset, interrupt_stack_bytes
         );
         println!(
-            "    [0x{:x} - 0x{:x}] Page tables ({} bytes)",
+            "    [0x{:x} - 0x{:x}] Trampoline page tables (3 pages)",
+            trampoline_tables_start, page_tables_start
+        );
+        println!("      Tramp P3:      0x{:x}", trampoline_p3_offset);
+        println!("      Tramp P2:      0x{:x}", trampoline_p2_offset);
+        println!("      Tramp P1:      0x{:x}", trampoline_p1_offset);
+        println!(
+            "    [0x{:x} - 0x{:x}] Main page tables ({} bytes)",
             page_tables_start, total_size, page_table_bytes
         );
         println!("      P2+P1:         0x{:x}", p2p1_offset);
@@ -479,17 +566,88 @@ impl UserSpaceManager {
         println!("      P4:            0x{:x}\n", p4_offset);
 
         // Get physical addresses by translating each page table's virtual address
-        let guest_mem_base_virt = guest_mem.as_ptr() as u64;
+        // All addresses must be page-aligned for page table entries
+        const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        const PAGE_MASK: u64 = PAGE_SIZE as u64 - 1;
 
-        let p4_virt = guest_mem_base_virt + p4_offset as u64;
-        let p4_phys =
-            virt_to_phys(p4_virt).ok_or("Failed to translate P4 virtual address to physical")?;
+        let guest_mem_base_kva = guest_mem.as_ptr() as u64;
 
-        let p3_virt = guest_mem_base_virt + p3_offset as u64;
-        let p3_phys =
-            virt_to_phys(p3_virt).ok_or("Failed to translate P3 virtual address to physical")?;
+        let p4_kva = guest_mem_base_kva + p4_offset as u64;
+        let p4_pa_raw = virt_to_phys(p4_kva).ok_or("Failed to translate P4 KVA to physical")?;
 
-        let p2p1_virt = guest_mem_base_virt + p2p1_offset as u64;
+        // Validate P4 physical address is page-aligned
+        if p4_pa_raw & PAGE_MASK != 0 {
+            println!("  ERROR: P4 PA 0x{:016x} is NOT page-aligned!", p4_pa_raw);
+            return Err("P4 table is not page-aligned in physical memory! This will break CR3.");
+        }
+        let p4_pa = p4_pa_raw & PTE_ADDR_MASK;
+
+        println!("  P4 setup:");
+        println!("    p4_offset in guest_mem: 0x{:x}", p4_offset);
+        println!("    p4_kva: 0x{:016x}", p4_kva);
+        println!("    p4_pa:  0x{:016x} (validated page-aligned ✓)", p4_pa);
+
+        let p3_kva = guest_mem_base_kva + p3_offset as u64;
+        let p3_pa_raw = virt_to_phys(p3_kva).ok_or("Failed to translate P3 KVA to physical")?;
+        if p3_pa_raw & PAGE_MASK != 0 {
+            println!("  ERROR: P3 PA 0x{:016x} is NOT page-aligned!", p3_pa_raw);
+            return Err("P3 table is not page-aligned in physical memory!");
+        }
+        let p3_pa = p3_pa_raw & PTE_ADDR_MASK;
+
+        let p2p1_kva = guest_mem_base_kva + p2p1_offset as u64;
+
+        // Get and validate trampoline page table physical addresses
+        let tramp_p3_kva = guest_mem_base_kva + trampoline_p3_offset as u64;
+        let tramp_p3_pa_raw = virt_to_phys(tramp_p3_kva)
+            .ok_or("Failed to translate trampoline P3 KVA to physical")?;
+        if tramp_p3_pa_raw & PAGE_MASK != 0 {
+            println!(
+                "  ERROR: Trampoline P3 PA 0x{:016x} is NOT page-aligned!",
+                tramp_p3_pa_raw
+            );
+            return Err("Trampoline P3 is not page-aligned in physical memory!");
+        }
+        let trampoline_p3_pa = tramp_p3_pa_raw & PTE_ADDR_MASK;
+
+        let tramp_p2_kva = guest_mem_base_kva + trampoline_p2_offset as u64;
+        let tramp_p2_pa_raw = virt_to_phys(tramp_p2_kva)
+            .ok_or("Failed to translate trampoline P2 KVA to physical")?;
+        if tramp_p2_pa_raw & PAGE_MASK != 0 {
+            println!(
+                "  ERROR: Trampoline P2 PA 0x{:016x} is NOT page-aligned!",
+                tramp_p2_pa_raw
+            );
+            return Err("Trampoline P2 is not page-aligned in physical memory!");
+        }
+        let trampoline_p2_pa = tramp_p2_pa_raw & PTE_ADDR_MASK;
+
+        let tramp_p1_kva = guest_mem_base_kva + trampoline_p1_offset as u64;
+        let tramp_p1_pa_raw = virt_to_phys(tramp_p1_kva)
+            .ok_or("Failed to translate trampoline P1 KVA to physical")?;
+        if tramp_p1_pa_raw & PAGE_MASK != 0 {
+            println!(
+                "  ERROR: Trampoline P1 PA 0x{:016x} is NOT page-aligned!",
+                tramp_p1_pa_raw
+            );
+            return Err("Trampoline P1 is not page-aligned in physical memory!");
+        }
+        let trampoline_p1_pa = tramp_p1_pa_raw & PTE_ADDR_MASK;
+
+        // Initialize trampoline page tables (will be set up when trampolines are mapped)
+        {
+            let (_, tramp_p3_raw) = guest_mem.split_at_mut(trampoline_p3_offset);
+            let tramp_p3 = u8_slice_to_u64_slice(&mut tramp_p3_raw[0..PAGE_SIZE]);
+            tramp_p3.fill(0);
+
+            let (_, tramp_p2_raw) = guest_mem.split_at_mut(trampoline_p2_offset);
+            let tramp_p2 = u8_slice_to_u64_slice(&mut tramp_p2_raw[0..PAGE_SIZE]);
+            tramp_p2.fill(0);
+
+            let (_, tramp_p1_raw) = guest_mem.split_at_mut(trampoline_p1_offset);
+            let tramp_p1 = u8_slice_to_u64_slice(&mut tramp_p1_raw[0..PAGE_SIZE]);
+            tramp_p1.fill(0);
+        }
 
         // Set up P4 table
         {
@@ -498,7 +656,13 @@ impl UserSpaceManager {
             p4_table.fill(0);
 
             // P4[0] points to P3
-            p4_table[0] = PDE64_ALL_ALLOWED | p3_phys;
+            p4_table[0] = PDE64_ALL_ALLOWED | p3_pa;
+
+            // Verify P4 is properly initialized
+            assert_ne!(
+                p4_table[0], 0,
+                "P4[0] must be non-zero after initialization"
+            );
         }
 
         // Set up P3 table
@@ -510,10 +674,14 @@ impl UserSpaceManager {
             // P3 entries point to P2 tables - translate each P2 table's address
             for p3_entry in 0..p2_table_number {
                 let p2_offset_in_tables = p3_entry * (TABLE_SIZE + 1) * PAGE_SIZE;
-                let p2_virt = p2p1_virt + p2_offset_in_tables as u64;
-                let p2_phys = virt_to_phys(p2_virt)
-                    .ok_or("Failed to translate P2 table virtual address to physical")?;
-                p3_table[p3_entry] = PDE64_ALL_ALLOWED | p2_phys;
+                let p2_kva = p2p1_kva + p2_offset_in_tables as u64;
+                let p2_pa_raw =
+                    virt_to_phys(p2_kva).ok_or("Failed to translate P2 table KVA to physical")?;
+                if p2_pa_raw & PAGE_MASK != 0 {
+                    return Err("P2 table is not page-aligned in physical memory!");
+                }
+                let p2_pa = p2_pa_raw & PTE_ADDR_MASK;
+                p3_table[p3_entry] = PDE64_ALL_ALLOWED | p2_pa;
             }
         }
 
@@ -531,9 +699,11 @@ impl UserSpaceManager {
         }
 
         Ok(Self {
-            guest_mem,
+            guest_mem: raw_allocation,
+            guest_mem_aligned_offset: alignment_offset,
             last_address, // Total buffer size (64MB) for page table calculations
-            p4_phys,
+            p4_pa,
+            p4_offset,
             stack_start: page_tables_start, // Where page tables start
             interrupt_start,                // Where interrupt structures start
             interrupt_handler_code_offset: handler_code_offset,
@@ -542,6 +712,12 @@ impl UserSpaceManager {
             idt_offset,
             interrupt_stack_offset,
             interrupt_virt_base, // Same as interrupt_start (buffer offset = virt addr)
+            trampoline_p3_offset,
+            trampoline_p2_offset,
+            trampoline_p1_offset,
+            trampoline_p3_pa,
+            trampoline_p2_pa,
+            trampoline_p1_pa,
         })
     }
 
@@ -574,21 +750,26 @@ impl UserSpaceManager {
         };
 
         // Get access to page tables
-        let guest_mem_base_virt = self.guest_mem.as_ptr() as u64;
+        // Extract values before mut borrow
+        let last_address = self.last_address;
+        let stack_start = self.stack_start;
 
-        let p2_table_number = self.last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
+        let guest_mem = self.get_aligned_mem_mut();
+        let guest_mem_base_kva = guest_mem.as_ptr() as u64;
+
+        let p2_table_number = last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
         let p1_table_number = p2_table_number * TABLE_SIZE;
-        let table_base = self.stack_start - ((p2_table_number + p1_table_number) << PAGE_SHIFT);
-        let table_base_virt = guest_mem_base_virt + table_base as u64;
+        let table_base = stack_start - ((p2_table_number + p1_table_number) << PAGE_SHIFT);
+        let table_base_kva = guest_mem_base_kva + table_base as u64;
 
-        let (_, table_raw) = self.guest_mem.split_at_mut(table_base);
+        let (_, table_raw) = guest_mem.split_at_mut(table_base);
         let table_array_len = (p2_table_number + p1_table_number) << PAGE_SHIFT;
         let table_array = u8_slice_to_u64_slice(&mut table_raw[0..table_array_len]);
 
-        // Use set_range to map the pages - pass table_base_virt for translation
+        // Use set_range to map the pages - pass table_base_kva for translation
         set_range(
             table_array,
-            table_base_virt,
+            table_base_kva,
             user_virt_start,
             user_virt_start + size,
             protection_flags,
@@ -601,12 +782,24 @@ impl UserSpaceManager {
 
     /// Get the PML4 physical address (for loading into CR3)
     pub fn get_cr3(&self) -> u64 {
-        self.p4_phys
+        self.p4_pa
+    }
+
+    /// Get the aligned portion of guest memory (internal helper)
+    fn get_aligned_mem(&self) -> &[u8] {
+        let start = self.guest_mem_aligned_offset;
+        &self.guest_mem[start..]
+    }
+
+    /// Get the aligned portion of guest memory as mutable (internal helper)
+    fn get_aligned_mem_mut(&mut self) -> &mut [u8] {
+        let start = self.guest_mem_aligned_offset;
+        &mut self.guest_mem[start..]
     }
 
     /// Get a pointer to the guest memory (for copying user code/data)
     pub fn get_guest_mem_mut(&mut self) -> &mut [u8] {
-        &mut self.guest_mem
+        self.get_aligned_mem_mut()
     }
 
     /// Get the address where interrupt handler code should be copied
@@ -658,41 +851,41 @@ impl UserSpaceManager {
         println!("Mapping interrupt infrastructure into user page tables...");
 
         // Calculate where page tables start (work backwards from end of 64MB)
-        let p2_table_number = self.last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
+        // Extract values before mut borrow
+        let last_address = self.last_address;
+        let interrupt_start = self.interrupt_start;
+        let interrupt_handler_code_offset = self.interrupt_handler_code_offset;
+
+        let p2_table_number = last_address.next_multiple_of(HUGE_PAGE) >> HUGE_PAGE_SHIFT;
         let p1_table_number = p2_table_number * TABLE_SIZE;
-        let table_base = self.last_address - ((p2_table_number + p1_table_number) << PAGE_SHIFT);
+        let table_base = last_address - ((p2_table_number + p1_table_number) << PAGE_SHIFT);
 
         // Interrupt structures: from interrupt_start to table_base (NOT to last_address!)
         let interrupt_structures_end = table_base;
 
         println!(
             "  Interrupt structures: 0x{:x} - 0x{:x}",
-            self.interrupt_start, interrupt_structures_end
+            interrupt_start, interrupt_structures_end
         );
         println!(
             "  Page tables (NOT mapped): 0x{:x} - 0x{:x}",
-            table_base, self.last_address
+            table_base, last_address
         );
 
         // Kernel virtual address = guest_mem base + buffer offset
-        let guest_mem_base_virt = self.guest_mem.as_ptr() as usize;
-        let guest_mem_base_virt_u64 = guest_mem_base_virt as u64;
-        let table_base_virt = guest_mem_base_virt_u64 + table_base as u64;
+        let guest_mem = self.get_aligned_mem_mut();
+        let guest_mem_base_kva = guest_mem.as_ptr() as u64;
+        let table_base_kva = guest_mem_base_kva + table_base as u64;
 
-        // println!("  DEBUG: guest_mem base = 0x{:x}", guest_mem_base_virt);
-        // println!("  DEBUG: guest_mem len = {} (0x{:x})", self.guest_mem.len(), self.guest_mem.len());
-        // println!("  DEBUG: table_base offset = 0x{:x}", table_base);
-        // println!("  DEBUG: table_base_virt = 0x{:x}", table_base_virt);
-
-        let (_, table_raw) = self.guest_mem.split_at_mut(table_base);
+        let (_, table_raw) = guest_mem.split_at_mut(table_base);
         let table_array_len = (p2_table_number + p1_table_number) << PAGE_SHIFT;
         let table_array = u8_slice_to_u64_slice(&mut table_raw[0..table_array_len]);
 
         // Map 1: Handler code page (EXECUTABLE, ring 0 only)
-        let handler_code_end = self.interrupt_handler_code_offset + PAGE_SIZE;
+        let handler_code_end = interrupt_handler_code_offset + PAGE_SIZE;
         println!(
             "  Mapping handler code: 0x{:x} - 0x{:x} (EXECUTABLE)",
-            self.interrupt_handler_code_offset, handler_code_end
+            interrupt_handler_code_offset, handler_code_end
         );
 
         let handler_flags = PDE64_PRESENT | PDE64_RW; // Ring 0 only, no USER bit
@@ -709,11 +902,11 @@ impl UserSpaceManager {
         // set_range adds page_offset to kernel_virt_start, so pass base, not base+offset!
         set_range(
             table_array,
-            table_base_virt,
-            self.interrupt_handler_code_offset,
+            table_base_kva,
+            interrupt_handler_code_offset,
             handler_code_end,
             handler_flags,
-            guest_mem_base_virt, // Pass BASE, set_range will add offset
+            guest_mem_base_kva as usize,
             0,
         )?;
 
@@ -726,19 +919,252 @@ impl UserSpaceManager {
 
             let structures_flags = PDE64_PRESENT | PDE64_RW; // Ring 0 only
 
-            // set_range adds page_offset to kernel_virt_start, so pass base!
             set_range(
                 table_array,
-                table_base_virt,
+                table_base_kva,
                 handler_code_end,
                 interrupt_structures_end,
                 structures_flags,
-                guest_mem_base_virt, // Pass BASE, set_range will add offset
+                guest_mem_base_kva as usize,
                 0,
             )?;
         }
 
         println!("✓ Interrupt infrastructure mapped (page tables excluded)");
+        Ok(())
+    }
+
+    /// Map trampolines into user page tables at high address (~2TB, below VMA region)
+    ///
+    /// Maps 2 pages at a high virtual address (same as kernel mapping) to allow
+    /// CR3 switching without breaking instruction fetching.
+    ///
+    /// # Arguments
+    /// * `trampoline_va_base` - Virtual address where trampolines should be mapped (e.g., 0x1FFF_FFFF_E000)
+    /// * `trampoline_pa1` - Physical address of first trampoline page
+    /// * `trampoline_pa2` - Physical address of second trampoline page
+    pub fn map_trampolines(
+        &mut self,
+        trampoline_va_base: u64,
+        trampoline_pa1: u64,
+        trampoline_pa2: u64,
+    ) -> Result<(), &'static str> {
+        println!("\n=== Mapping Trampolines in User Page Tables ===");
+        println!("  VA base:  0x{:016x}", trampoline_va_base);
+        println!("  PA page1: 0x{:016x}", trampoline_pa1);
+        println!("  PA page2: 0x{:016x}", trampoline_pa2);
+
+        // Calculate page table indices for trampoline VA
+        // VA structure: [PML4:9][PDPT:9][PD:9][PT:9][offset:12]
+        let pml4_idx = (trampoline_va_base >> 39) & 0x1FF;
+        let pdpt_idx = (trampoline_va_base >> 30) & 0x1FF;
+        let pd_idx = (trampoline_va_base >> 21) & 0x1FF;
+        let pt_idx = (trampoline_va_base >> 12) & 0x1FF;
+
+        println!(
+            "  Indices: PML4[{}] -> PDPT[{}] -> PD[{}] -> PT[{}]",
+            pml4_idx, pdpt_idx, pd_idx, pt_idx
+        );
+
+        // Use pre-validated physical addresses from struct (calculated during init)
+        let tramp_p3_pa = self.trampoline_p3_pa;
+        let tramp_p2_pa = self.trampoline_p2_pa;
+        let tramp_p1_pa = self.trampoline_p1_pa;
+
+        println!("  Trampoline page table physical addresses (pre-validated):");
+        println!("    P3 PA: 0x{:016x}", tramp_p3_pa);
+        println!("    P2 PA: 0x{:016x}", tramp_p2_pa);
+        println!("    P1 PA: 0x{:016x}", tramp_p1_pa);
+
+        // Extract offsets before mut borrow
+        let p4_offset = self.p4_offset;
+        let p4_pa = self.p4_pa;
+        let trampoline_p3_offset = self.trampoline_p3_offset;
+        let trampoline_p2_offset = self.trampoline_p2_offset;
+        let trampoline_p1_offset = self.trampoline_p1_offset;
+
+        // Get aligned memory for modifications
+        let guest_mem = self.get_aligned_mem_mut();
+        let guest_mem_base_kva = guest_mem.as_ptr() as u64;
+
+        // Step 1: Update P4 to point to trampoline P3
+        {
+            let (_, p4_raw) = guest_mem.split_at_mut(p4_offset);
+            let p4_table = u8_slice_to_u64_slice(&mut p4_raw[0..PAGE_SIZE]);
+
+            p4_table[pml4_idx as usize] = PDE64_ALL_ALLOWED | tramp_p3_pa;
+            println!(
+                "  Set P4[{}] = 0x{:016x}",
+                pml4_idx, p4_table[pml4_idx as usize]
+            );
+
+            // Debug: Read back directly from guest_mem to verify
+            let p4_entry_offset = p4_offset + (pml4_idx as usize * 8);
+            let readback = u64::from_le_bytes([
+                guest_mem[p4_entry_offset],
+                guest_mem[p4_entry_offset + 1],
+                guest_mem[p4_entry_offset + 2],
+                guest_mem[p4_entry_offset + 3],
+                guest_mem[p4_entry_offset + 4],
+                guest_mem[p4_entry_offset + 5],
+                guest_mem[p4_entry_offset + 6],
+                guest_mem[p4_entry_offset + 7],
+            ]);
+            println!(
+                "  DEBUG: Read back from guest_mem[0x{:x}] = 0x{:016x}",
+                p4_entry_offset, readback
+            );
+
+            // Extra debug: What physical address does this guest_mem location map to?
+            let entry_kva = guest_mem_base_kva + p4_entry_offset as u64;
+            if let Some(entry_pa) = unsafe { virt_to_phys(entry_kva) } {
+                let entry_pa_clean = entry_pa & 0x000F_FFFF_FFFF_F000;
+                let offset_in_page = (p4_entry_offset & 0xFFF) as u64;
+                println!(
+                    "  DEBUG: guest_mem[0x{:x}] KVA: 0x{:016x}",
+                    p4_entry_offset, entry_kva
+                );
+                println!(
+                    "  DEBUG: Maps to PA: 0x{:016x} + 0x{:x} = 0x{:016x}",
+                    entry_pa_clean,
+                    offset_in_page,
+                    entry_pa_clean + offset_in_page
+                );
+                println!(
+                    "  DEBUG: CR3 expects P4[63] at: 0x{:016x} + 0x1f8 = 0x{:016x}",
+                    p4_pa,
+                    p4_pa + 0x1f8
+                );
+            }
+        }
+
+        // Step 2: Set P3 to point to P2
+        {
+            let (_, tramp_p3_raw) = guest_mem.split_at_mut(trampoline_p3_offset);
+            let tramp_p3 = u8_slice_to_u64_slice(&mut tramp_p3_raw[0..PAGE_SIZE]);
+
+            tramp_p3[pdpt_idx as usize] = PDE64_ALL_ALLOWED | tramp_p2_pa;
+            println!(
+                "  Set P3[{}] = 0x{:016x}",
+                pdpt_idx, tramp_p3[pdpt_idx as usize]
+            );
+
+            // Debug: Read back directly from guest_mem
+            let p3_entry_offset = trampoline_p3_offset + (pdpt_idx as usize * 8);
+            let readback = u64::from_le_bytes([
+                guest_mem[p3_entry_offset],
+                guest_mem[p3_entry_offset + 1],
+                guest_mem[p3_entry_offset + 2],
+                guest_mem[p3_entry_offset + 3],
+                guest_mem[p3_entry_offset + 4],
+                guest_mem[p3_entry_offset + 5],
+                guest_mem[p3_entry_offset + 6],
+                guest_mem[p3_entry_offset + 7],
+            ]);
+            println!(
+                "  DEBUG: Read back from guest_mem[0x{:x}] = 0x{:016x}",
+                p3_entry_offset, readback
+            );
+        }
+
+        // Step 3: Set P2 to point to P1
+        {
+            let (_, tramp_p2_raw) = guest_mem.split_at_mut(trampoline_p2_offset);
+            let tramp_p2 = u8_slice_to_u64_slice(&mut tramp_p2_raw[0..PAGE_SIZE]);
+
+            tramp_p2[pd_idx as usize] = PDE64_ALL_ALLOWED | tramp_p1_pa;
+            println!(
+                "  Set P2[{}] = 0x{:016x}",
+                pd_idx, tramp_p2[pd_idx as usize]
+            );
+
+            // Debug: Read back directly from guest_mem
+            let p2_entry_offset = trampoline_p2_offset + (pd_idx as usize * 8);
+            let readback = u64::from_le_bytes([
+                guest_mem[p2_entry_offset],
+                guest_mem[p2_entry_offset + 1],
+                guest_mem[p2_entry_offset + 2],
+                guest_mem[p2_entry_offset + 3],
+                guest_mem[p2_entry_offset + 4],
+                guest_mem[p2_entry_offset + 5],
+                guest_mem[p2_entry_offset + 6],
+                guest_mem[p2_entry_offset + 7],
+            ]);
+            println!(
+                "  DEBUG: Read back from guest_mem[0x{:x}] = 0x{:016x}",
+                p2_entry_offset, readback
+            );
+        }
+
+        // Step 4: Set P1 entries to point to actual trampoline physical pages
+        {
+            let (_, tramp_p1_raw) = guest_mem.split_at_mut(trampoline_p1_offset);
+            let tramp_p1 = u8_slice_to_u64_slice(&mut tramp_p1_raw[0..PAGE_SIZE]);
+
+            // Validate input physical addresses are page-aligned
+            const PAGE_MASK: u64 = (PAGE_SIZE - 1) as u64;
+            if trampoline_pa1 & PAGE_MASK != 0 {
+                return Err("trampoline_pa1 is not page-aligned!");
+            }
+            if trampoline_pa2 & PAGE_MASK != 0 {
+                return Err("trampoline_pa2 is not page-aligned!");
+            }
+
+            // Map first trampoline page
+            tramp_p1[pt_idx as usize] = PDE64_ALL_ALLOWED | trampoline_pa1;
+            println!(
+                "  Set P1[{}] = 0x{:016x} (trampoline page 1)",
+                pt_idx, tramp_p1[pt_idx as usize]
+            );
+
+            // Map second trampoline page (next PT entry)
+            tramp_p1[(pt_idx + 1) as usize] = PDE64_ALL_ALLOWED | trampoline_pa2;
+            println!(
+                "  Set P1[{}] = 0x{:016x} (trampoline page 2)",
+                pt_idx + 1,
+                tramp_p1[(pt_idx + 1) as usize]
+            );
+
+            // Debug: Read back both entries directly from guest_mem
+            let p1_entry1_offset = trampoline_p1_offset + (pt_idx as usize * 8);
+            let readback1 = u64::from_le_bytes([
+                guest_mem[p1_entry1_offset],
+                guest_mem[p1_entry1_offset + 1],
+                guest_mem[p1_entry1_offset + 2],
+                guest_mem[p1_entry1_offset + 3],
+                guest_mem[p1_entry1_offset + 4],
+                guest_mem[p1_entry1_offset + 5],
+                guest_mem[p1_entry1_offset + 6],
+                guest_mem[p1_entry1_offset + 7],
+            ]);
+            println!(
+                "  DEBUG: Read back P1[{}] from guest_mem[0x{:x}] = 0x{:016x}",
+                pt_idx, p1_entry1_offset, readback1
+            );
+
+            let p1_entry2_offset = trampoline_p1_offset + ((pt_idx + 1) as usize * 8);
+            let readback2 = u64::from_le_bytes([
+                guest_mem[p1_entry2_offset],
+                guest_mem[p1_entry2_offset + 1],
+                guest_mem[p1_entry2_offset + 2],
+                guest_mem[p1_entry2_offset + 3],
+                guest_mem[p1_entry2_offset + 4],
+                guest_mem[p1_entry2_offset + 5],
+                guest_mem[p1_entry2_offset + 6],
+                guest_mem[p1_entry2_offset + 7],
+            ]);
+            println!(
+                "  DEBUG: Read back P1[{}] from guest_mem[0x{:x}] = 0x{:016x}",
+                pt_idx + 1,
+                p1_entry2_offset,
+                readback2
+            );
+        }
+
+        // Ensure all writes are visible to other cores/reads via direct map
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        println!("✓ Trampolines mapped in user page tables");
         Ok(())
     }
 
@@ -1056,7 +1482,7 @@ impl UserSpaceManager {
             self.guest_mem.len(),
             self.guest_mem.len() >> 20
         );
-        println!("  PML4 (CR3):             0x{:016x}", self.p4_phys);
+        println!("  PML4 (CR3):             0x{:016x}", self.p4_pa);
         println!("\n  Memory layout:");
         println!(
             "    User space:           0x0 - 0x{:x} ({:.2} MB)",

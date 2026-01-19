@@ -615,6 +615,150 @@ fn main() {
         user_space.get_cr3()
     );
 
+    // Map trampolines in user page tables
+    println!("=== Mapping Trampolines in User Page Tables ===");
+    if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
+        panic!("Failed to map trampolines in user space: {}", e);
+    }
+    println!();
+
+    // Verify trampoline mappings in user page tables
+    println!("=== Verifying User Page Table Trampoline Mappings ===");
+    let user_cr3 = user_space.get_cr3();
+    println!("User CR3: 0x{:016x}", user_cr3);
+
+    // Mask off high bits to get actual physical address (Unikraft tags memory)
+    let user_cr3_phys = user_cr3 & 0x0000_FFFF_FFFF_F000;
+    println!("User CR3 (physical): 0x{:016x}", user_cr3_phys);
+
+    // FIRST: Read directly from guest_mem to confirm the write is there
+    let guest_mem_ptr = user_space.get_guest_mem_mut().as_ptr();
+    unsafe {
+        let p4_entry_in_guest_mem = guest_mem_ptr.add(0x3fff1f8) as *const u64;
+        let value_in_guest_mem = core::ptr::read_volatile(p4_entry_in_guest_mem);
+        println!(
+            "\n  DEBUG: Reading P4[63] directly from guest_mem[0x3fff1f8] = 0x{:016x}",
+            value_in_guest_mem
+        );
+
+        // What physical address does guest_mem ACTUALLY map to RIGHT NOW?
+        let p4_page_virt = guest_mem_ptr.add(0x3fff000) as u64;
+        let actual_phys = walk_and_get_pa(get_current_cr3(), p4_page_virt);
+        println!(
+            "  DEBUG: guest_mem[0x3fff000] ACTUALLY maps to physical: 0x{:016x}",
+            actual_phys
+        );
+        println!(
+            "  DEBUG: So P4[63] is ACTUALLY at physical: 0x{:016x}",
+            actual_phys + 0x1f8
+        );
+        println!("  DEBUG: But CR3 says P4 is at: 0x{:016x}", user_cr3_phys);
+        if actual_phys != user_cr3_phys {
+            println!("  DEBUG: MISMATCH! guest_mem moved or virt_to_phys was wrong!");
+        }
+    }
+
+    // Helper function to get current CR3
+    fn get_current_cr3() -> u64 {
+        let cr3: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        }
+        cr3 & 0x0000_FFFF_FFFF_F000
+    }
+
+    // Debug: manually walk to see what's in the tables
+    unsafe {
+        const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        const DIRECTMAP_START: u64 = 0xffffff8000000000;
+
+        let pml4_idx = (high_va_page1 >> 39) & 0x1FF;
+        let pdpt_idx = (high_va_page1 >> 30) & 0x1FF;
+        let pd_idx = (high_va_page1 >> 21) & 0x1FF;
+        let pt_idx = (high_va_page1 >> 12) & 0x1FF;
+
+        println!(
+            "\n  Debug: Walking user page tables for 0x{:016x}",
+            high_va_page1
+        );
+        println!(
+            "    Indices: PML4[{}] PDPT[{}] PD[{}] PT[{}]",
+            pml4_idx, pdpt_idx, pd_idx, pt_idx
+        );
+
+        let pml4_phys = user_cr3_phys & PTE_ADDR_MASK;
+        let pml4_virt = (pml4_phys + DIRECTMAP_START) as *const u64;
+
+        // Debug: verify we're reading from the right address
+        println!(
+            "    Reading PML4[{}] from physical 0x{:016x} via direct map 0x{:016x}",
+            pml4_idx,
+            pml4_phys + (pml4_idx * 8),
+            pml4_virt.add(pml4_idx as usize) as u64
+        );
+
+        // Memory fence to ensure all writes are visible
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
+        println!("    PML4[{}] = 0x{:016x}", pml4_idx, pml4e);
+
+        if (pml4e & 1) != 0 {
+            let pdpt_phys = pml4e & PTE_ADDR_MASK;
+            let pdpt_virt = (pdpt_phys + DIRECTMAP_START) as *const u64;
+            let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
+            println!("    PDPT[{}] = 0x{:016x}", pdpt_idx, pdpte);
+
+            if (pdpte & 1) != 0 {
+                let pd_phys = pdpte & PTE_ADDR_MASK;
+                let pd_virt = (pd_phys + DIRECTMAP_START) as *const u64;
+                let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
+                println!("    PD[{}] = 0x{:016x}", pd_idx, pde);
+
+                if (pde & 1) != 0 {
+                    let pt_phys = pde & PTE_ADDR_MASK;
+                    let pt_virt = (pt_phys + DIRECTMAP_START) as *const u64;
+                    let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
+                    println!("    PT[{}] = 0x{:016x}", pt_idx, pte);
+
+                    let final_pa = (pte & PTE_ADDR_MASK) | (high_va_page1 & 0xFFF);
+                    println!("    Final PA: 0x{:016x}", final_pa);
+                }
+            }
+        }
+    }
+
+    unsafe {
+        // Verify page 1
+        let pa = walk_and_get_pa(user_cr3_phys, high_va_page1);
+        if pa == page1_pa {
+            println!(
+                "\n  ✓ User PT: VA 0x{:016x} -> PA 0x{:016x} (CORRECT)",
+                high_va_page1, pa
+            );
+        } else {
+            println!(
+                "\n  ✗ User PT: VA 0x{:016x} -> PA 0x{:016x} (EXPECTED 0x{:016x})",
+                high_va_page1, pa, page1_pa
+            );
+        }
+
+        // Verify page 2
+        let pa = walk_and_get_pa(user_cr3_phys, high_va_page2);
+        if pa == page2_pa {
+            println!(
+                "  ✓ User PT: VA 0x{:016x} -> PA 0x{:016x} (CORRECT)",
+                high_va_page2, pa
+            );
+        } else {
+            println!(
+                "  ✗ User PT: VA 0x{:016x} -> PA 0x{:016x} (EXPECTED 0x{:016x})",
+                high_va_page2, pa, page2_pa
+            );
+        }
+    }
+    println!();
+
     // Setup interrupt handlers for user space
     println!("=== Setting up user space interrupt handlers ===");
 
