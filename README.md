@@ -68,3 +68,8 @@ Conclusions:
   - running in debug mode might detach qemu from the console
   - find the process via `ps -ef | grep qemu-system-x86_64` and then use `kill` to close it
   - TODO: figure out how to attach the symbols of the client application in order to properly debug the client app
+
+## useful commands
+- make rust
+- make run | tee runlog.txt
+- tail -1 runlog.txt | xdd

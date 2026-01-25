@@ -19,8 +19,8 @@ global_asm!(
 user_handlers_start:
     // Marker for start of handler code
 
-// Helper macro to define exception handlers 0-31 (except 32)
-.macro EXCEPTION_HANDLER num, char
+// Helper macro for exceptions WITHOUT error code
+.macro EXCEPTION_HANDLER_NO_ERR num, char
 .globl user_exception_handler_\num
 user_exception_handler_\num:
     // Save minimal context
@@ -38,88 +38,260 @@ user_exception_handler_\num:
     iretq
 .endm
 
+// Helper macro for exceptions WITH error code (must pop it before iretq!)
+// Exceptions with error code: 8, 10, 11, 12, 13, 14, 17, 21, 29, 30
+.macro EXCEPTION_HANDLER_WITH_ERR num, char
+.globl user_exception_handler_\num
+user_exception_handler_\num:
+    // Error code is on stack - save it first, then print, then handle
+    push rax
+    push rdx
+    
+    // Output character to COM1 for debugging
+    mov al, \char
+    mov dx, {COM1}
+    out dx, al
+    
+    // Print CR2 (faulting address) for page faults - useful for debugging
+    // Read CR2 and print as 16 hex digits
+    .if \num == 14
+        mov al, '@'
+        out dx, al
+        mov rax, cr2
+        mov rcx, 16
+    1:
+        rol rax, 4
+        push rax
+        and al, 0xF
+        add al, '0'
+        cmp al, '9'
+        jle 2f
+        add al, 7
+    2:
+        out dx, al
+        pop rax
+        dec rcx
+        jnz 1b
+        mov al, '@'
+        out dx, al
+    .endif
+    
+    // Restore regs
+    pop rdx
+    pop rax
+    
+    // Pop the error code that was pushed by the CPU
+    add rsp, 8
+    
+    iretq
+.endm
+
 // Define handlers for exceptions 0-31
-EXCEPTION_HANDLER 0, '0'   // Divide by zero
-EXCEPTION_HANDLER 1, '1'   // Debug
-EXCEPTION_HANDLER 2, '2'   // NMI
-EXCEPTION_HANDLER 3, '3'   // Breakpoint
-EXCEPTION_HANDLER 4, '4'   // Overflow
-EXCEPTION_HANDLER 5, '5'   // Bound range
-EXCEPTION_HANDLER 6, '6'   // Invalid opcode
-EXCEPTION_HANDLER 7, '7'   // Device not available
-EXCEPTION_HANDLER 8, '8'   // Double fault (uses IST)
-EXCEPTION_HANDLER 9, '9'   // Coprocessor segment overrun
-EXCEPTION_HANDLER 10, 'A'  // Invalid TSS
-EXCEPTION_HANDLER 11, 'B'  // Segment not present
-EXCEPTION_HANDLER 12, 'C'  // Stack fault
-EXCEPTION_HANDLER 13, 'D'  // General protection fault
-EXCEPTION_HANDLER 14, 'E'  // Page fault
-EXCEPTION_HANDLER 15, 'F'  // Reserved
-EXCEPTION_HANDLER 16, 'G'  // x87 FPU error
-EXCEPTION_HANDLER 17, 'H'  // Alignment check
-EXCEPTION_HANDLER 18, 'I'  // Machine check
-EXCEPTION_HANDLER 19, 'J'  // SIMD exception
-EXCEPTION_HANDLER 20, 'K'  // Virtualization exception
-EXCEPTION_HANDLER 21, 'L'  // Control protection exception
-EXCEPTION_HANDLER 22, 'M'  // Reserved
-EXCEPTION_HANDLER 23, 'N'  // Reserved
-EXCEPTION_HANDLER 24, 'O'  // Reserved
-EXCEPTION_HANDLER 25, 'P'  // Reserved
-EXCEPTION_HANDLER 26, 'Q'  // Reserved
-EXCEPTION_HANDLER 27, 'R'  // Reserved
-EXCEPTION_HANDLER 28, 'S'  // Reserved
-EXCEPTION_HANDLER 29, 'T'  // Reserved
-EXCEPTION_HANDLER 30, 'U'  // Reserved
-EXCEPTION_HANDLER 31, 'V'  // Reserved
+// Exceptions WITHOUT error code: 0-7, 9, 15, 16, 18-20, 22-28, 31
+EXCEPTION_HANDLER_NO_ERR 0, '0'   // Divide by zero
+EXCEPTION_HANDLER_NO_ERR 1, '1'   // Debug
+EXCEPTION_HANDLER_NO_ERR 2, '2'   // NMI
+EXCEPTION_HANDLER_NO_ERR 3, '3'   // Breakpoint
+EXCEPTION_HANDLER_NO_ERR 4, '4'   // Overflow
+EXCEPTION_HANDLER_NO_ERR 5, '5'   // Bound range
+EXCEPTION_HANDLER_NO_ERR 6, '6'   // Invalid opcode
+EXCEPTION_HANDLER_NO_ERR 7, '7'   // Device not available
+// Double fault (8) - special handler that halts instead of returning
+// EXCEPTION_HANDLER_WITH_ERR 8, '8' - replaced with halt version below
+EXCEPTION_HANDLER_NO_ERR 9, '9'   // Coprocessor segment overrun
+
+// Special double fault handler (exception 8) that halts the system
+// Double fault means unrecoverable state - halt to prevent infinite loop
+.globl user_exception_handler_8
+user_exception_handler_8:
+    push rax
+    push rdx
+    
+    // Output '8' for double fault then '!' repeatedly
+    mov dx, {COM1}
+    mov al, '8'
+    out dx, al
+    mov al, '!'
+    out dx, al
+    mov al, 'D'
+    out dx, al
+    mov al, 'F'
+    out dx, al
+    mov al, '!'
+    out dx, al
+    
+    // Halt loop - system is in unrecoverable state
+1:
+    cli
+    hlt
+    jmp 1b
+
+EXCEPTION_HANDLER_WITH_ERR 10, 'A'  // Invalid TSS
+EXCEPTION_HANDLER_WITH_ERR 11, 'B'  // Segment not present
+EXCEPTION_HANDLER_WITH_ERR 12, 'C'  // Stack fault
+EXCEPTION_HANDLER_WITH_ERR 13, 'D'  // General protection fault
+// Page fault (14) - special handler that halts after printing info
+// EXCEPTION_HANDLER_WITH_ERR 14, 'E' - replaced with halt version below
+EXCEPTION_HANDLER_NO_ERR 15, 'F'  // Reserved
+
+// Special page fault handler (exception 14) that halts after printing CR2
+// This prevents infinite fault loops and makes debugging clearer
+.globl user_exception_handler_14
+user_exception_handler_14:
+    // Save RBX first - it contains our marker value from user code!
+    push rbx
+    push rax
+    push rdx
+    push rcx
+    
+    mov dx, {COM1}
+    
+    // Output 'E' for page fault
+    mov al, 'E'
+    out dx, al
+    
+    // Print 'B' then RBX value (marker from user code: should be 0xDEADBEEFCAFEBABE)
+    mov al, 'B'
+    out dx, al
+    mov rax, [rsp + 24]  // RBX is at offset 24 (after rcx, rdx, rax pushes)
+    mov rcx, 16
+.Lprint_rbx:
+    rol rax, 4
+    push rax
+    and al, 0xF
+    add al, '0'
+    cmp al, '9'
+    jle .Lrbx_ok
+    add al, 7
+.Lrbx_ok:
+    out dx, al
+    pop rax
+    dec rcx
+    jnz .Lprint_rbx
+    mov al, ':'
+    out dx, al
+    
+    // Print 'S' then RSP value to show what stack we're on
+    mov al, 'S'
+    out dx, al
+    mov rax, rsp
+    add rax, 32          // Adjust for our 4 pushes (rbx, rax, rdx, rcx)
+    mov rcx, 16
+.Lprint_rsp:
+    rol rax, 4
+    push rax
+    and al, 0xF
+    add al, '0'
+    cmp al, '9'
+    jle .Lrsp_ok
+    add al, 7
+.Lrsp_ok:
+    out dx, al
+    pop rax
+    dec rcx
+    jnz .Lprint_rsp
+    mov al, ':'
+    out dx, al
+    
+    // Print CR2 (faulting address) as 16 hex digits between @ markers
+    mov al, '@'
+    out dx, al
+    mov rax, cr2
+    mov rcx, 16
+1:
+    rol rax, 4
+    push rax
+    and al, 0xF
+    add al, '0'
+    cmp al, '9'
+    jle 2f
+    add al, 7
+2:
+    out dx, al
+    pop rax
+    dec rcx
+    jnz 1b
+    mov al, '@'
+    out dx, al
+    
+    // Print error code from stack (at [rsp + 32] due to our 4 pushes)
+    mov al, '['
+    out dx, al
+    mov rax, [rsp + 32]   // error code
+    mov rcx, 16
+3:
+    rol rax, 4
+    push rax
+    and al, 0xF
+    add al, '0'
+    cmp al, '9'
+    jle 4f
+    add al, 7
+4:
+    out dx, al
+    pop rax
+    dec rcx
+    jnz 3b
+    mov al, ']'
+    out dx, al
+    
+    // Print "PF!" marker
+    mov al, 'P'
+    out dx, al
+    mov al, 'F'
+    out dx, al
+    mov al, '!'
+    out dx, al
+    
+    // Halt loop
+5:
+    cli
+    hlt
+    jmp 5b
+
+EXCEPTION_HANDLER_NO_ERR 16, 'G'  // x87 FPU error
+EXCEPTION_HANDLER_WITH_ERR 17, 'H'  // Alignment check
+EXCEPTION_HANDLER_NO_ERR 18, 'I'  // Machine check
+EXCEPTION_HANDLER_NO_ERR 19, 'J'  // SIMD exception
+EXCEPTION_HANDLER_NO_ERR 20, 'K'  // Virtualization exception
+EXCEPTION_HANDLER_WITH_ERR 21, 'L'  // Control protection exception
+EXCEPTION_HANDLER_NO_ERR 22, 'M'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 23, 'N'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 24, 'O'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 25, 'P'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 26, 'Q'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 27, 'R'  // Reserved
+EXCEPTION_HANDLER_NO_ERR 28, 'S'  // Reserved
+EXCEPTION_HANDLER_WITH_ERR 29, 'T'  // Reserved (some sources say error code)
+EXCEPTION_HANDLER_WITH_ERR 30, 'U'  // Reserved (security exception has error code)
+EXCEPTION_HANDLER_NO_ERR 31, 'V'  // Reserved
 
 // Handler for INT 32 - User exit syscall
-// This handler switches CR3 back to kernel and returns to kernel loop
+// This handler jumps to the User->Kernel trampoline
+// The trampoline address will be patched in at runtime (see TRAMPOLINE_ADDR_OFFSET)
 .globl user_exception_handler_32
 user_exception_handler_32:
-    // Save all general-purpose registers
+    // Output 'X' to signal user exit attempt
     push rax
-    push rbx
-    push rcx
     push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
     
-    // Output 'X' to signal user exit
     mov al, 'X'
     mov dx, {COM1}
     out dx, al
     
-    // Call Rust function to handle user exit
-    // It will switch CR3 and set up return to kernel
-    call user_exit_handler_rust
-    
-    // Restore registers
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
     pop rdx
-    pop rcx
-    pop rbx
     pop rax
     
-    iretq
+    // Jump to User->Kernel trampoline
+    // This address will be patched at runtime
+    // mov rax, <trampoline_address>
+    .byte 0x48, 0xB8  // REX.W + MOV RAX, imm64
+.globl user_handler_32_trampoline_addr
+user_handler_32_trampoline_addr:
+    .quad 0xDEADBEEFDEADBEEF  // Placeholder - will be patched
+    
+    // jmp rax
+    jmp rax
 
 .globl user_handlers_end
 user_handlers_end:
@@ -167,6 +339,7 @@ extern "C" {
     
     static user_handlers_start: u8;
     static user_handlers_end: u8;
+    static user_handler_32_trampoline_addr: u64;
 }
 
 /// Get the handler function addresses as an array
@@ -243,4 +416,15 @@ extern "C" fn user_exit_handler_rust() {
             options(nostack, preserves_flags)
         );
     }
+}
+
+/// Get the offset of the trampoline address field in handler 32
+/// This is where we need to patch the User->Kernel trampoline address
+///
+/// # Safety
+/// Returns offset based on assembly layout
+pub unsafe fn get_handler_32_trampoline_offset() -> usize {
+    let handler_start = &user_handlers_start as *const u8 as usize;
+    let trampoline_field = &user_handler_32_trampoline_addr as *const u64 as usize;
+    trampoline_field - handler_start
 }

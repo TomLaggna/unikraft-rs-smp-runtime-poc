@@ -14,8 +14,15 @@
 mod cpu_startup;
 mod dandelion_commons;
 mod elfloader;
+mod trampolines;
+mod user_code;
 mod user_handlers;
 mod user_pagetable;
+
+// Debug utilities module
+#[macro_use]
+mod debug_utils;
+use debug_utils::*;
 
 // Boot trampoline is in src/boot/ directory
 #[path = "boot/boot_trampoline_bindings.rs"]
@@ -33,6 +40,7 @@ use core::ptr;
 use cpu_startup::*;
 use elfloader::elf_parser::ParsedElf;
 use std::fs;
+use user_pagetable::{virt_to_phys, walk_pt, walk_pt_with_flags};
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
 const DIRECTMAP_AREA_START: u64 = 0xffffff8000000000; // -512 GiB
@@ -46,6 +54,7 @@ const PAGE_SIZE: usize = 4096;
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITE: u64 = 1 << 1;
 const PTE_USER: u64 = 1 << 2;
+const PTE_NX: u64 = 1 << 63;
 const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Walk kernel page tables to get physical address of a virtual address
@@ -106,6 +115,7 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
     let pml4e_ptr = pml4_virt.add(pml4_idx as usize);
     let mut pml4e = ptr::read_volatile(pml4e_ptr);
     let pdpt_phys = if (pml4e & PTE_PRESENT) == 0 {
+        // ...
         // Allocate new PDPT
         let layout = std::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
         let new_pdpt_ptr = std::alloc::alloc_zeroed(layout);
@@ -116,10 +126,23 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
         ptr::write_volatile(new_pdpt_ptr, 0);
         let pdpt_va = new_pdpt_ptr as u64;
         let pdpt_pa = get_physical_address(cr3, pdpt_va);
+        // Ensure new entry is Writable and NOT NX (Supervisor)
         pml4e = pdpt_pa | PTE_PRESENT | PTE_WRITE;
         ptr::write_volatile(pml4e_ptr, pml4e);
         pdpt_pa
     } else {
+        // LOG EXISTING ENTRY
+        // debug_mem_println!("DEBUG MAP: PML4[{}] existing: 0x{:016x}", pml4_idx, pml4e);
+        // Force clear NX bit if present
+        if (pml4e & PTE_NX) != 0 {
+            debug_mem_println!(
+                "DEBUG MAP: Clearing NX on PML4[{}] (was 0x{:016x})",
+                pml4_idx,
+                pml4e
+            );
+            pml4e &= !PTE_NX;
+            ptr::write_volatile(pml4e_ptr, pml4e);
+        }
         pml4e & PTE_ADDR_MASK
     };
 
@@ -141,6 +164,11 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
         ptr::write_volatile(pdpte_ptr, pdpte);
         pd_pa
     } else {
+        // Force clear NX bit if present
+        if (pdpte & PTE_NX) != 0 {
+            pdpte &= !PTE_NX;
+            ptr::write_volatile(pdpte_ptr, pdpte);
+        }
         pdpte & PTE_ADDR_MASK
     };
 
@@ -162,13 +190,18 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
         ptr::write_volatile(pde_ptr, pde);
         pt_pa
     } else {
+        // Force clear NX bit if present
+        if (pde & PTE_NX) != 0 {
+            pde &= !PTE_NX;
+            ptr::write_volatile(pde_ptr, pde);
+        }
         pde & PTE_ADDR_MASK
     };
 
     // Set PT entry
     let pt_virt = (pt_phys + DIRECTMAP_AREA_START) as *mut u64;
     let pte_ptr = pt_virt.add(pt_idx as usize);
-    let pte = pa | PTE_PRESENT | PTE_WRITE;
+    let pte = pa | PTE_PRESENT | PTE_WRITE; // Ensure NX bit 63 is 0
     ptr::write_volatile(pte_ptr, pte);
 
     // Flush TLB
@@ -181,6 +214,28 @@ fn main() {
     // Initialize serial console for debugging (for custom output)
     // Note: On Unikraft with std, regular println! should work
     println!("Rust Multicore Boot Starting...");
+    // Log CR4 register value to check SMEP/SMAP
+    unsafe {
+        let cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4);
+        println!("CR4 value at startup: 0x{:016x}", cr4);
+        println!(
+            "  SMEP: {}",
+            if (cr4 & (1 << 20)) != 0 {
+                "ENABLED"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "  SMAP: {}",
+            if (cr4 & (1 << 21)) != 0 {
+                "ENABLED"
+            } else {
+                "disabled"
+            }
+        );
+    }
 
     // Check where we (BSP) are running from
     let main_addr = main as *const () as u64;
@@ -222,22 +277,22 @@ fn main() {
     // ========================================================================
     // TEST: Allocate memory and map at high address
     // ========================================================================
-    println!("\n=== TEST: Trampoline Allocation and High Address Mapping ===");
+    debug_trampoline_println!("\n=== TEST: Trampoline Allocation and High Address Mapping ===");
 
     // Step 1: Allocate buffer and find page-aligned addresses
     const TRAMPOLINE_SIZE: usize = 3 * PAGE_SIZE;
     let trampoline_buffer = vec![0u8; TRAMPOLINE_SIZE];
     let buffer_va = trampoline_buffer.as_ptr() as u64;
 
-    println!("Step 1: Allocated {} bytes (3 pages)", TRAMPOLINE_SIZE);
-    println!("  Buffer VA: 0x{:016x}", buffer_va);
+    debug_trampoline_println!("Step 1: Allocated {} bytes (3 pages)", TRAMPOLINE_SIZE);
+    debug_trampoline_println!("  Buffer VA: 0x{:016x}", buffer_va);
 
     // Get CR3
     let cr3: u64;
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
     }
-    println!("  CR3: 0x{:016x}", cr3);
+    debug_trampoline_println!("  CR3: 0x{:016x}", cr3);
 
     // Find page-aligned addresses within the buffer
     let page1_va = if (buffer_va & 0xFFF) == 0 {
@@ -247,9 +302,9 @@ fn main() {
     };
     let page2_va = page1_va + PAGE_SIZE as u64;
 
-    println!("  Page-aligned addresses found:");
-    println!("    Page 1 VA: 0x{:016x}", page1_va);
-    println!("    Page 2 VA: 0x{:016x}", page2_va);
+    debug_trampoline_println!("  Page-aligned addresses found:");
+    debug_trampoline_println!("    Page 1 VA: 0x{:016x}", page1_va);
+    debug_trampoline_println!("    Page 2 VA: 0x{:016x}", page2_va);
 
     // Walk page tables to get actual physical addresses for these VAs
     let (page1_pa, page2_pa) = unsafe {
@@ -259,9 +314,9 @@ fn main() {
         )
     };
 
-    println!("  Physical addresses (from page table walk):");
-    println!("    Page 1 PA: 0x{:016x}", page1_pa);
-    println!("    Page 2 PA: 0x{:016x}", page2_pa);
+    debug_trampoline_println!("  Physical addresses (from page table walk):");
+    debug_trampoline_println!("    Page 1 PA: 0x{:016x}", page1_pa);
+    debug_trampoline_println!("    Page 2 PA: 0x{:016x}", page2_pa);
 
     // Step 2: Map the pages at high address (but BELOW VMA management region)
     // Unikraft's VMA system manages addresses starting from CONFIG_LIBUKVMEM_DEFAULT_BASE
@@ -271,14 +326,16 @@ fn main() {
     let high_va_page1 = HIGH_VA_BASE;
     let high_va_page2 = HIGH_VA_BASE + PAGE_SIZE as u64;
 
-    println!("\nStep 2: Mapping at high addresses (~2TB, below VMA region)");
-    println!(
+    debug_trampoline_println!("\nStep 2: Mapping at high addresses (~2TB, below VMA region)");
+    debug_trampoline_println!(
         "  High VA page 1: 0x{:016x} -> PA: 0x{:016x}",
-        high_va_page1, page1_pa
+        high_va_page1,
+        page1_pa
     );
-    println!(
+    debug_trampoline_println!(
         "  High VA page 2: 0x{:016x} -> PA: 0x{:016x}",
-        high_va_page2, page2_pa
+        high_va_page2,
+        page2_pa
     );
 
     // Step 4: Map both pages at high addresses
@@ -290,205 +347,16 @@ fn main() {
             panic!("Failed to map page 2: {}", e);
         }
     }
-    println!("  ✓ Pages mapped successfully");
+    debug_trampoline_println!("  ✓ Pages mapped successfully");
 
     // Explicit TLB flush for both addresses
     unsafe {
         asm!("invlpg [{}]", in(reg) high_va_page1, options(nostack));
         asm!("invlpg [{}]", in(reg) high_va_page2, options(nostack));
     }
-    println!("  ✓ TLB flushed");
+    debug_trampoline_println!("  ✓ TLB flushed");
 
-    // Step 3: Verify page table setup by walking them
-    println!("\nStep 3: Verifying page table mappings");
-    for (i, high_va) in [high_va_page1, high_va_page2].iter().enumerate() {
-        println!(
-            "  Verifying mapping for page {} at 0x{:016x}",
-            i + 1,
-            high_va
-        );
-
-        let pml4_idx = (high_va >> 39) & 0x1FF;
-        let pdpt_idx = (high_va >> 30) & 0x1FF;
-        let pd_idx = (high_va >> 21) & 0x1FF;
-        let pt_idx = (high_va >> 12) & 0x1FF;
-
-        println!(
-            "    Indices: PML4[{}] PDPT[{}] PD[{}] PT[{}]",
-            pml4_idx, pdpt_idx, pd_idx, pt_idx
-        );
-
-        unsafe {
-            // Walk PML4
-            let cr3_phys = cr3 & PTE_ADDR_MASK;
-            let pml4_virt = (cr3_phys + DIRECTMAP_AREA_START) as *const u64;
-            let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
-            println!(
-                "    PML4[{}] = 0x{:016x} (P={}, W={}, U={})",
-                pml4_idx,
-                pml4e,
-                pml4e & 1,
-                (pml4e >> 1) & 1,
-                (pml4e >> 2) & 1
-            );
-
-            if (pml4e & 1) == 0 {
-                println!("    ✗ ERROR: PML4 entry not present!");
-                continue;
-            }
-
-            // Walk PDPT
-            let pdpt_phys = pml4e & PTE_ADDR_MASK;
-            let pdpt_virt = (pdpt_phys + DIRECTMAP_AREA_START) as *const u64;
-            let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
-            println!(
-                "    PDPT[{}] = 0x{:016x} (P={}, W={}, U={})",
-                pdpt_idx,
-                pdpte,
-                pdpte & 1,
-                (pdpte >> 1) & 1,
-                (pdpte >> 2) & 1
-            );
-
-            if (pdpte & 1) == 0 {
-                println!("    ✗ ERROR: PDPT entry not present!");
-                continue;
-            }
-
-            // Walk PD
-            let pd_phys = pdpte & PTE_ADDR_MASK;
-            let pd_virt = (pd_phys + DIRECTMAP_AREA_START) as *const u64;
-            let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
-            println!(
-                "    PD[{}] = 0x{:016x} (P={}, W={}, U={})",
-                pd_idx,
-                pde,
-                pde & 1,
-                (pde >> 1) & 1,
-                (pde >> 2) & 1
-            );
-
-            if (pde & 1) == 0 {
-                println!("    ✗ ERROR: PD entry not present!");
-                continue;
-            }
-
-            // Walk PT
-            let pt_phys = pde & PTE_ADDR_MASK;
-            let pt_virt = (pt_phys + DIRECTMAP_AREA_START) as *const u64;
-            let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
-            println!(
-                "    PT[{}] = 0x{:016x} (P={}, W={}, U={})",
-                pt_idx,
-                pte,
-                pte & 1,
-                (pte >> 1) & 1,
-                (pte >> 2) & 1
-            );
-
-            if (pte & 1) == 0 {
-                println!("    ✗ ERROR: PT entry not present!");
-                continue;
-            }
-
-            // Extract final physical address
-            let mapped_phys = pte & PTE_ADDR_MASK;
-            let expected_phys = if i == 0 { page1_pa } else { page2_pa };
-            println!("    Final physical address: 0x{:016x}", mapped_phys);
-            println!("    Expected physical:      0x{:016x}", expected_phys);
-
-            if mapped_phys == expected_phys {
-                println!("    ✓ Physical address matches!");
-            } else {
-                println!("    ✗ ERROR: Physical address mismatch!");
-            }
-        }
-    }
-
-    // Step 4: TEST - Verify mappings work correctly
-    println!("\nStep 4: Testing trampoline access patterns");
-
-    println!("\n  Note: High addresses (~2TB) are below VMA management region.");
-    println!("        This avoids VMA checks while providing separation from user space.");
-    println!("        Both kernel and user mode can access these addresses.");
-
-    // Write test pattern via low (original) VAs
-    unsafe {
-        core::ptr::write_volatile(page1_va as *mut u8, 0xDE);
-        core::ptr::write_volatile((page1_va + 1) as *mut u8, 0xAD);
-        core::ptr::write_volatile((page1_va + 2) as *mut u8, 0xBE);
-        core::ptr::write_volatile((page1_va + 3) as *mut u8, 0xEF);
-
-        core::ptr::write_volatile(page2_va as *mut u8, 0xCA);
-        core::ptr::write_volatile((page2_va + 1) as *mut u8, 0xFE);
-        core::ptr::write_volatile((page2_va + 2) as *mut u8, 0xBA);
-        core::ptr::write_volatile((page2_va + 3) as *mut u8, 0xBE);
-    }
-    println!("\n  Test 1: Kernel access via LOW addresses (original allocation)");
-    println!("    Written via low VA: DE AD BE EF at 0x{:x}", page1_va);
-
-    // Read back via low addresses
-    unsafe {
-        let val1 = core::ptr::read_volatile(page1_va as *const u32);
-        let val2 = core::ptr::read_volatile(page2_va as *const u32);
-        println!("    Read back: 0x{:08x} and 0x{:08x}", val1, val2);
-        if val1 == 0xEFBEADDE && val2 == 0xBEBAFECA {
-            println!("    ✓ Low address access works!");
-        }
-    }
-
-    // Test access via DIRECT MAP (alternative kernel access method)
-    const DIRECTMAP_START: u64 = 0xffffff8000000000;
-    println!("\n  Test 2: Kernel access via DIRECT MAP");
-    let directmap_page1 = DIRECTMAP_START + page1_pa;
-    let directmap_page2 = DIRECTMAP_START + page2_pa;
-    println!("    Direct map VA page 1: 0x{:016x}", directmap_page1);
-    println!("    Direct map VA page 2: 0x{:016x}", directmap_page2);
-
-    unsafe {
-        // Read what we wrote earlier
-        let val1 = core::ptr::read_volatile(directmap_page1 as *const u32);
-        let val2 = core::ptr::read_volatile(directmap_page2 as *const u32);
-        println!("    Read via direct map: 0x{:08x} and 0x{:08x}", val1, val2);
-        if val1 == 0xEFBEADDE && val2 == 0xBEBAFECA {
-            println!("    ✓ Direct map access works!");
-        }
-
-        // Write new values via direct map
-        core::ptr::write_volatile(directmap_page1 as *mut u32, 0x12345678);
-        core::ptr::write_volatile(directmap_page2 as *mut u32, 0x9ABCDEF0);
-
-        // Read back via low VA to confirm they point to same physical memory
-        let val1_low = core::ptr::read_volatile(page1_va as *const u32);
-        let val2_low = core::ptr::read_volatile(page2_va as *const u32);
-        println!(
-            "    Wrote via direct map, read via low VA: 0x{:08x} and 0x{:08x}",
-            val1_low, val2_low
-        );
-        if val1_low == 0x12345678 && val2_low == 0x9ABCDEF0 {
-            println!("    ✓ Direct map and low VA point to same physical memory!");
-        }
-    }
-
-    println!("\n  ✓ SUCCESS: Trampoline memory is correctly allocated and accessible");
-    println!(
-        "    - Low addresses: 0x{:x} (original allocation)",
-        page1_va
-    );
-    println!(
-        "    - High addresses: 0x{:x} (~2TB, below VMA region)",
-        high_va_page1
-    );
-    println!(
-        "    - Direct map: 0x{:x} (physical memory mapping)",
-        directmap_page1
-    );
-    println!(
-        "    - All addresses point to same physical pages: 0x{:x}, 0x{:x}",
-        page1_pa, page2_pa
-    );
-
-    println!("=== TEST COMPLETE ===\n");
+    debug_trampoline_println!("=== TEST COMPLETE ===\n");
 
     // Step 1: Enable x2APIC on BSP
     unsafe {
@@ -530,7 +398,7 @@ fn main() {
     // ========================================================================
     // TEST: User Space Manager (Dandelion Pattern)
     // ========================================================================
-    println!("\n=== Testing User Space Manager (Dandelion Pattern) ===");
+    debug_mem_println!("\n=== Testing User Space Manager (Dandelion Pattern) ===");
 
     // Create a 64 MB user address space (reduced for 1GB RAM system)
     const USER_SPACE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
@@ -541,46 +409,91 @@ fn main() {
         }
     };
 
+    // user_space.print_stats(); // Assume this also needs wrapping or is inside struct
+    #[cfg(feature = "debug-user-mem")]
     user_space.print_stats();
-    println!();
 
-    // Example: Map a small code region
-    // Allocate 64KB for user code in kernel space
+    debug_mem_println!("");
+
+    // Get user code from assembly module
+    let user_code_asm = unsafe { user_code::get_user_code() };
+    let user_code_entry_offset = unsafe { user_code::get_entry_offset() };
+
+    // Allocate 64KB + 4KB for user code in kernel space (extra for alignment)
     let user_code_size = 64 * 1024;
-    let mut user_code_buf = vec![0u8; user_code_size];
+    let user_code_buf_raw = vec![0u8; user_code_size + 4096];
 
-    // Write simple code pattern (NOP instructions)
-    for i in 0..user_code_size {
-        user_code_buf[i] = 0x90; // NOP
+    // Page-align the buffer pointer
+    let user_code_buf_ptr = user_code_buf_raw.as_ptr() as usize;
+    let user_code_buf_aligned = (user_code_buf_ptr + 4095) & !4095;
+    let user_code_buf_slice = unsafe {
+        core::slice::from_raw_parts_mut(user_code_buf_aligned as *mut u8, user_code_size)
+    };
+
+    // Copy the assembly user code to the aligned buffer
+    user_code_buf_slice[..user_code_asm.len()].copy_from_slice(user_code_asm);
+
+    debug_mem_println!("  User code (from assembly): {} bytes", user_code_asm.len());
+    debug_mem_println!("  Entry offset: 0x{:x}", user_code_entry_offset);
+    debug_mem_println!("  User code buffer raw: 0x{:x}", user_code_buf_ptr);
+    debug_mem_println!("  User code buffer aligned: 0x{:x}", user_code_buf_aligned);
+    debug_mem_println!("  User code will:");
+    debug_mem_println!("    1. Set RBX to marker value");
+    debug_mem_println!("    2. Trigger INT 32 (calls U->K trampoline)");
+    debug_mem_println!("    3. Should never reach loop");
+
+    // Force kernel to map all pages in the user code buffer
+    for offset in (0..user_code_size).step_by(4096) {
+        // Touch each page to ensure it's mapped, but don't overwrite our code
+        if offset >= user_code_asm.len() {
+            user_code_buf_slice[offset] = 0;
+        }
     }
 
     // Map it at virtual address 0x400000 (typical ELF base) in user space
     let user_code_virt = 0x400000;
-    let user_code_kernel_virt = user_code_buf.as_ptr() as usize;
+    let user_code_kernel_virt = user_code_buf_aligned;
 
     if let Err(e) = unsafe {
-        user_space.map_user_range(user_code_virt, user_code_kernel_virt, user_code_size, false)
+        user_space.map_user_range(
+            user_code_virt,
+            user_code_kernel_virt,
+            user_code_size,
+            false,
+            false,
+        )
     } {
         panic!("Failed to map user code: {}", e);
     }
 
-    println!("✓ Mapped user code region:");
-    println!(
+    debug_mem_println!("✓ Mapped user code region:");
+    debug_mem_println!(
         "  User virtual:   0x{:x} - 0x{:x}",
         user_code_virt,
         user_code_virt + user_code_size
     );
-    println!(
+    debug_mem_println!(
         "  Kernel virtual: 0x{:x} - 0x{:x}",
         user_code_kernel_virt,
         user_code_kernel_virt + user_code_size
     );
-    println!();
+    debug_mem_println!("");
 
     // Example: Map user stack
     // Stack must end BEFORE interrupt structures to avoid overlap
     let user_stack_size = 16 * 4096; // 64KB
-    let mut user_stack_buf = vec![0u8; user_stack_size];
+    let user_stack_buf = vec![0u8; user_stack_size];
+
+    // Force kernel to map all pages in the stack buffer
+    {
+        let buf_ptr = user_stack_buf.as_ptr() as *mut u8;
+        unsafe {
+            for page in 0..(user_stack_size / 4096) {
+                core::ptr::write_volatile(buf_ptr.add(page * 4096), 0);
+            }
+        }
+    }
+
     // Place stack just below interrupt structures
     let interrupt_virt_base = user_space.get_interrupt_virt_base();
     let user_stack_virt = interrupt_virt_base - user_stack_size;
@@ -592,71 +505,32 @@ fn main() {
             user_stack_kernel_virt,
             user_stack_size,
             true,
+            false, // kernel_accessible=false, U=1 for trampoline stack
         )
     } {
         panic!("Failed to map user stack: {}", e);
     }
 
-    println!("✓ Mapped user stack:");
-    println!(
-        "  User virtual:   0x{:x} - 0x{:x}",
-        user_stack_virt,
-        user_stack_virt + user_stack_size
-    );
-    println!(
-        "  Kernel virtual: 0x{:x} - 0x{:x}",
-        user_stack_kernel_virt,
-        user_stack_kernel_virt + user_stack_size
-    );
-    println!();
-
-    println!(
+    debug_mem_println!(
         "✓ User space ready! CR3 = 0x{:016x}\n",
         user_space.get_cr3()
     );
 
     // Map trampolines in user page tables
-    println!("=== Mapping Trampolines in User Page Tables ===");
+    debug_trampoline_println!("=== Mapping Trampolines in User Page Tables ===");
     if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
         panic!("Failed to map trampolines in user space: {}", e);
     }
-    println!();
+    debug_trampoline_println!("");
 
     // Verify trampoline mappings in user page tables
-    println!("=== Verifying User Page Table Trampoline Mappings ===");
+    debug_trampoline_println!("=== Verifying User Page Table Trampoline Mappings ===");
     let user_cr3 = user_space.get_cr3();
-    println!("User CR3: 0x{:016x}", user_cr3);
+    debug_trampoline_println!("User CR3: 0x{:016x}", user_cr3);
 
     // Mask off high bits to get actual physical address (Unikraft tags memory)
     let user_cr3_phys = user_cr3 & 0x0000_FFFF_FFFF_F000;
-    println!("User CR3 (physical): 0x{:016x}", user_cr3_phys);
-
-    // FIRST: Read directly from guest_mem to confirm the write is there
-    let guest_mem_ptr = user_space.get_guest_mem_mut().as_ptr();
-    unsafe {
-        let p4_entry_in_guest_mem = guest_mem_ptr.add(0x3fff1f8) as *const u64;
-        let value_in_guest_mem = core::ptr::read_volatile(p4_entry_in_guest_mem);
-        println!(
-            "\n  DEBUG: Reading P4[63] directly from guest_mem[0x3fff1f8] = 0x{:016x}",
-            value_in_guest_mem
-        );
-
-        // What physical address does guest_mem ACTUALLY map to RIGHT NOW?
-        let p4_page_virt = guest_mem_ptr.add(0x3fff000) as u64;
-        let actual_phys = walk_and_get_pa(get_current_cr3(), p4_page_virt);
-        println!(
-            "  DEBUG: guest_mem[0x3fff000] ACTUALLY maps to physical: 0x{:016x}",
-            actual_phys
-        );
-        println!(
-            "  DEBUG: So P4[63] is ACTUALLY at physical: 0x{:016x}",
-            actual_phys + 0x1f8
-        );
-        println!("  DEBUG: But CR3 says P4 is at: 0x{:016x}", user_cr3_phys);
-        if actual_phys != user_cr3_phys {
-            println!("  DEBUG: MISMATCH! guest_mem moved or virt_to_phys was wrong!");
-        }
-    }
+    debug_trampoline_println!("User CR3 (physical): 0x{:016x}", user_cr3_phys);
 
     // Helper function to get current CR3
     fn get_current_cr3() -> u64 {
@@ -667,115 +541,92 @@ fn main() {
         cr3 & 0x0000_FFFF_FFFF_F000
     }
 
-    // Debug: manually walk to see what's in the tables
+    let kernel_cr3: u64;
     unsafe {
-        const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-        const DIRECTMAP_START: u64 = 0xffffff8000000000;
+        core::arch::asm!("mov {}, cr3", out(reg) kernel_cr3);
+    }
+    let kernel_cr3_pa = kernel_cr3 & 0x0000_FFFF_FFFF_F000;
+    debug_trampoline_println!("  Kernel CR3 (PA): 0x{:016x}", kernel_cr3_pa);
+    debug_trampoline_println!("  User CR3 (PA):   0x{:016x}", user_cr3_phys);
 
-        let pml4_idx = (high_va_page1 >> 39) & 0x1FF;
-        let pdpt_idx = (high_va_page1 >> 30) & 0x1FF;
-        let pd_idx = (high_va_page1 >> 21) & 0x1FF;
-        let pt_idx = (high_va_page1 >> 12) & 0x1FF;
+    // User code entry point
+    let user_entry_va = user_code_virt;
+    // User stack top must be INSIDE the mapped region (U=1), not at the boundary
+    // The stack grows down, so we need RSP to point to a valid user address.
+    // user_stack_virt + user_stack_size is the first byte AFTER the stack mapping,
+    // which borders the interrupt structures (U=0). Subtract 16 for alignment.
+    let user_stack_top = user_stack_virt + user_stack_size - 16;
 
-        println!(
-            "\n  Debug: Walking user page tables for 0x{:016x}",
-            high_va_page1
-        );
-        println!(
-            "    Indices: PML4[{}] PDPT[{}] PD[{}] PT[{}]",
-            pml4_idx, pdpt_idx, pd_idx, pt_idx
-        );
+    debug_trampoline_println!("\n  User space layout:");
+    debug_trampoline_println!("    Entry point: 0x{:016x}", user_entry_va);
+    debug_trampoline_println!("    Stack top:   0x{:016x}", user_stack_top);
 
-        let pml4_phys = user_cr3_phys & PTE_ADDR_MASK;
-        let pml4_virt = (pml4_phys + DIRECTMAP_START) as *const u64;
+    // Trampoline page 1: Kernel->User
+    // Data section layout at end of page:
+    //   Offset 0x100: saved kernel RSP (8 bytes)
+    //   Offset 0x108: user CR3 (8 bytes)
+    //   Offset 0x110: user RSP (8 bytes)
+    //   Offset 0x118: user entry (8 bytes)
+    //   Offset 0x120: GDT base (8 bytes)
+    //   Offset 0x128: GDT limit (2 bytes) + padding (6 bytes)
+    //   Offset 0x130: IDT base (8 bytes)
+    //   Offset 0x138: IDT limit (2 bytes) + padding (6 bytes)
+    //   Offset 0x140: TSS selector (2 bytes) + padding (6 bytes)
 
-        // Debug: verify we're reading from the right address
-        println!(
-            "    Reading PML4[{}] from physical 0x{:016x} via direct map 0x{:016x}",
-            pml4_idx,
-            pml4_phys + (pml4_idx * 8),
-            pml4_virt.add(pml4_idx as usize) as u64
-        );
+    debug_trampoline_println!(
+        "\n  Setting up Kernel->User trampoline at 0x{:016x}:",
+        high_va_page1
+    );
 
-        // Memory fence to ensure all writes are visible
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    // Copy K->U trampoline code to page 1
+    unsafe {
+        let k2u_code = trampolines::get_k2u_code();
+        debug_trampoline_println!("    Trampoline code size: {} bytes", k2u_code.len());
 
-        let pml4e = ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
-        println!("    PML4[{}] = 0x{:016x}", pml4_idx, pml4e);
-
-        if (pml4e & 1) != 0 {
-            let pdpt_phys = pml4e & PTE_ADDR_MASK;
-            let pdpt_virt = (pdpt_phys + DIRECTMAP_START) as *const u64;
-            let pdpte = ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
-            println!("    PDPT[{}] = 0x{:016x}", pdpt_idx, pdpte);
-
-            if (pdpte & 1) != 0 {
-                let pd_phys = pdpte & PTE_ADDR_MASK;
-                let pd_virt = (pd_phys + DIRECTMAP_START) as *const u64;
-                let pde = ptr::read_volatile(pd_virt.add(pd_idx as usize));
-                println!("    PD[{}] = 0x{:016x}", pd_idx, pde);
-
-                if (pde & 1) != 0 {
-                    let pt_phys = pde & PTE_ADDR_MASK;
-                    let pt_virt = (pt_phys + DIRECTMAP_START) as *const u64;
-                    let pte = ptr::read_volatile(pt_virt.add(pt_idx as usize));
-                    println!("    PT[{}] = 0x{:016x}", pt_idx, pte);
-
-                    let final_pa = (pte & PTE_ADDR_MASK) | (high_va_page1 & 0xFFF);
-                    println!("    Final PA: 0x{:016x}", final_pa);
-                }
-            }
-        }
+        // Copy code
+        let dst = high_va_page1 as *mut u8;
+        core::ptr::copy_nonoverlapping(k2u_code.as_ptr(), dst, k2u_code.len());
+        debug_trampoline_println!("    ✓ Code copied");
     }
 
-    unsafe {
-        // Verify page 1
-        let pa = walk_and_get_pa(user_cr3_phys, high_va_page1);
-        if pa == page1_pa {
-            println!(
-                "\n  ✓ User PT: VA 0x{:016x} -> PA 0x{:016x} (CORRECT)",
-                high_va_page1, pa
-            );
-        } else {
-            println!(
-                "\n  ✗ User PT: VA 0x{:016x} -> PA 0x{:016x} (EXPECTED 0x{:016x})",
-                high_va_page1, pa, page1_pa
-            );
-        }
+    debug_trampoline_println!(
+        "\n  Setting up User->Kernel trampoline at 0x{:016x}:",
+        high_va_page2
+    );
 
-        // Verify page 2
-        let pa = walk_and_get_pa(user_cr3_phys, high_va_page2);
-        if pa == page2_pa {
-            println!(
-                "  ✓ User PT: VA 0x{:016x} -> PA 0x{:016x} (CORRECT)",
-                high_va_page2, pa
-            );
-        } else {
-            println!(
-                "  ✗ User PT: VA 0x{:016x} -> PA 0x{:016x} (EXPECTED 0x{:016x})",
-                high_va_page2, pa, page2_pa
-            );
-        }
+    // Copy U->K trampoline code to page 2
+    unsafe {
+        let u2k_code = trampolines::get_u2k_code();
+        debug_trampoline_println!("    Trampoline code size: {} bytes", u2k_code.len());
+
+        // Copy code
+        let dst = high_va_page2 as *mut u8;
+        core::ptr::copy_nonoverlapping(u2k_code.as_ptr(), dst, u2k_code.len());
+        debug_trampoline_println!("    ✓ Code copied");
     }
-    println!();
+
+    debug_trampoline_println!(
+        "\n  Trampolines copied, will patch data sections after interrupt setup"
+    );
+    debug_trampoline_println!("");
 
     // Setup interrupt handlers for user space
-    println!("=== Setting up user space interrupt handlers ===");
+    debug_trampoline_println!("=== Setting up user space interrupt handlers ===");
 
     // Get handler code and addresses from assembly
     let handler_code = unsafe { user_handlers::get_handler_code() };
     let handler_addresses = unsafe { user_handlers::get_handler_addresses() };
     let handler_base = handler_addresses[0]; // Use first handler as base
 
-    println!("Handler code size: {} bytes", handler_code.len());
-    println!("Original handler base: 0x{:016x}", handler_base);
+    debug_trampoline_println!("Handler code size: {} bytes", handler_code.len());
+    debug_trampoline_println!("Original handler base: 0x{:016x}", handler_base);
 
     // Get current kernel stack for TSS.RSP0
     let kernel_stack: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) kernel_stack);
     }
-    println!("Kernel stack (for TSS.RSP0): 0x{:016x}", kernel_stack);
+    debug_trampoline_println!("Kernel stack (for TSS.RSP0): 0x{:016x}", kernel_stack);
 
     // Setup all interrupt infrastructure
     let interrupt_config = unsafe {
@@ -789,6 +640,255 @@ fn main() {
             Err(e) => panic!("Failed to setup interrupt infrastructure: {}", e),
         }
     };
+
+    // Add verification for GDT/TSS (Moved after setup)
+    unsafe {
+        let user_cr3 = user_space.get_cr3();
+        let gdt_uva = user_space.get_gdt_uva() as u64;
+        debug_mem_println!(
+            "\n  VERIFY: Walking page tables for GDT UVA 0x{:x}...",
+            gdt_uva
+        );
+        #[cfg(feature = "debug-user-mem")]
+        match walk_pt_with_flags(user_cr3, gdt_uva) {
+            Ok((ma, flags)) => println!(
+                "    ✓ GDT UVA 0x{:x} -> PA 0x{:x} Flags=0x{:x}",
+                gdt_uva, ma, flags
+            ),
+            Err(e) => println!("    ✗ GDT UVA 0x{:x} -> ERROR: {}", gdt_uva, e),
+        }
+
+        let tss_uva = user_space.get_tss_uva() as u64;
+        debug_mem_println!(
+            "  VERIFY: Walking page tables for TSS UVA 0x{:x}...",
+            tss_uva
+        );
+        #[cfg(feature = "debug-user-mem")]
+        match walk_pt_with_flags(user_cr3, tss_uva) {
+            Ok((ma, flags)) => println!(
+                "    ✓ TSS UVA 0x{:x} -> PA 0x{:x} Flags=0x{:x}",
+                tss_uva, ma, flags
+            ),
+            Err(e) => println!("    ✗ TSS UVA 0x{:x} -> ERROR: {}", tss_uva, e),
+        }
+    }
+
+    // Patch the trampoline address into INT 32 handler
+    debug_trampoline_println!("\nPatching User->Kernel trampoline address into INT 32 handler...");
+    unsafe {
+        let trampoline_offset = user_handlers::get_handler_32_trampoline_offset();
+        debug_trampoline_println!(
+            "  Trampoline field offset in handler code: 0x{:x}",
+            trampoline_offset
+        );
+
+        let handler_code_offset = user_space.get_interrupt_handler_code_address();
+        let guest_mem = user_space.get_guest_mem_mut();
+        let trampoline_field_offset = handler_code_offset + trampoline_offset;
+
+        debug_trampoline_println!("  Handler code starts at: 0x{:x}", handler_code_offset);
+        debug_trampoline_println!("  Trampoline field at: 0x{:x}", trampoline_field_offset);
+        debug_trampoline_println!(
+            "  Patching with U->K trampoline VA: 0x{:016x}",
+            high_va_page2
+        );
+
+        // Write the trampoline address
+        let ptr = guest_mem.as_mut_ptr().add(trampoline_field_offset) as *mut u64;
+        core::ptr::write_volatile(ptr, high_va_page2);
+
+        // Verify the write
+        let readback = core::ptr::read_volatile(ptr);
+        debug_trampoline_println!("  Verification: read back 0x{:016x}", readback);
+        if readback == high_va_page2 {
+            debug_trampoline_println!("  ✓ Trampoline address patched successfully!");
+        } else {
+            panic!("Failed to patch trampoline address!");
+        }
+    }
+    debug_trampoline_println!("");
+
+    // Patch the trampoline data sections with runtime values
+    debug_trampoline_println!("Patching trampoline data sections...");
+
+    unsafe {
+        // Patch K->U trampoline data fields
+        debug_trampoline_println!("\n  K->U trampoline data:");
+
+        // user_cr3_value
+        let offset = trampolines::k2u_offsets::user_cr3_value() as u64;
+        debug_trampoline_println!(
+            "    Computing address: 0x{:016x} + 0x{:x} = 0x{:016x}",
+            high_va_page1,
+            offset,
+            high_va_page1 + offset
+        );
+        let ptr = (high_va_page1 + offset) as *mut u64;
+        core::ptr::write_volatile(ptr, user_cr3_phys);
+        debug_trampoline_println!(
+            "    user_cr3 = 0x{:016x} (offset 0x{:x})",
+            user_cr3_phys,
+            offset
+        );
+
+        // user_stack_top
+        let offset = trampolines::k2u_offsets::user_stack_top() as u64;
+        debug_trampoline_println!(
+            "    CRITICAL: user_stack_top offset = 0x{:x} ({})",
+            offset,
+            offset
+        );
+        let ptr = (high_va_page1 + offset) as *mut u64;
+        debug_trampoline_println!("    Writing to address: 0x{:016x}", ptr as u64);
+        core::ptr::write_volatile(ptr, user_stack_top as u64);
+        debug_trampoline_println!(
+            "    user_rsp = 0x{:016x} (offset 0x{:x})",
+            user_stack_top,
+            offset
+        );
+
+        // Verify the write
+        let readback = core::ptr::read_volatile(ptr);
+        debug_trampoline_println!("    Verification: read back 0x{:016x}", readback);
+        if readback != user_stack_top as u64 {
+            debug_trampoline_println!("    ✗ ERROR: user_stack_top was not written correctly!");
+        }
+
+        // Read back what LEA will actually compute (use the same offset)
+        let lea_computed_addr = high_va_page1 + offset; // Use actual offset
+        debug_trampoline_println!(
+            "    DEBUG: LEA will compute address: 0x{:016x}",
+            lea_computed_addr
+        );
+        let value_at_lea = core::ptr::read_volatile(lea_computed_addr as *const u64);
+        debug_trampoline_println!(
+            "    DEBUG: Reading from LEA address via kernel PT: 0x{:016x}",
+            value_at_lea
+        );
+
+        // Also verify physical address of the exact byte we're reading
+        let pa_of_data = walk_and_get_pa(kernel_cr3, lea_computed_addr);
+        debug_trampoline_println!(
+            "    DEBUG: Kernel PT maps data address 0x{:016x} -> PA 0x{:016x}",
+            lea_computed_addr,
+            pa_of_data
+        );
+        let pa_of_data_user = walk_and_get_pa(user_cr3_phys, lea_computed_addr);
+        debug_trampoline_println!(
+            "    DEBUG: User PT maps data address   0x{:016x} -> PA 0x{:016x}",
+            lea_computed_addr,
+            pa_of_data_user
+        );
+
+        // Verify the physical addresses match
+        if pa_of_data != pa_of_data_user {
+            debug_trampoline_println!("    ✗ CRITICAL ERROR: Kernel and User PTs map data to DIFFERENT physical addresses!");
+            panic!("Physical address mismatch!");
+        }
+
+        // Read the value directly from physical memory via direct map
+        const DIRECTMAP_START: u64 = 0xffffff8000000000;
+        let direct_map_addr = DIRECTMAP_START + pa_of_data;
+        let value_via_direct_map = core::ptr::read_volatile(direct_map_addr as *const u64);
+        debug_trampoline_println!(
+            "    DEBUG: Reading from PA {} via direct map: 0x{:016x}",
+            pa_of_data,
+            value_via_direct_map
+        );
+
+        if value_via_direct_map != user_stack_top as u64 {
+            debug_trampoline_println!("    ✗ ERROR: Physical memory contains WRONG value!");
+            debug_trampoline_println!("       Expected: 0x{:016x}", user_stack_top);
+            debug_trampoline_println!("       Got:      0x{:016x}", value_via_direct_map);
+        }
+
+        // Flush TLB for this address in case it was cached
+        core::arch::asm!("invlpg [{}]", in(reg) ptr as u64, options(nostack));
+
+        // user_entry_point
+        let offset = trampolines::k2u_offsets::user_entry_point() as u64;
+        let ptr = (high_va_page1 + offset) as *mut u64;
+        core::ptr::write_volatile(ptr, user_entry_va as u64);
+        debug_trampoline_println!(
+            "    user_entry = 0x{:016x} (offset 0x{:x})",
+            user_entry_va,
+            offset
+        );
+
+        // gdt_desc (limit + base)
+        let offset = trampolines::k2u_offsets::gdt_desc() as u64;
+        let ptr = (high_va_page1 + offset) as *mut u16;
+        core::ptr::write_volatile(ptr, interrupt_config.gdt_limit);
+        let ptr = (high_va_page1 + offset + 2) as *mut u64;
+        // Use User Virtual Address for GDT base (mapped in user space)
+        let gdt_base_uva = user_space.get_gdt_uva() as u64;
+        core::ptr::write_volatile(ptr, gdt_base_uva);
+        debug_trampoline_println!(
+            "    gdt_desc = 0x{:04x}:0x{:016x} (offset 0x{:x})",
+            interrupt_config.gdt_limit,
+            gdt_base_uva,
+            offset
+        );
+
+        // idt_desc (limit + base)
+        let offset = trampolines::k2u_offsets::idt_desc() as u64;
+        let ptr = (high_va_page1 + offset) as *mut u16;
+        core::ptr::write_volatile(ptr, interrupt_config.idt_limit);
+        let ptr = (high_va_page1 + offset + 2) as *mut u64;
+        // Use User Virtual Address for IDT base
+        let idt_base_uva = user_space.get_idt_uva() as u64;
+        core::ptr::write_volatile(ptr, idt_base_uva);
+        debug_trampoline_println!(
+            "    idt_desc = 0x{:04x}:0x{:016x} (offset 0x{:x})",
+            interrupt_config.idt_limit,
+            idt_base_uva,
+            offset
+        );
+
+        // tss_selector
+        let offset = trampolines::k2u_offsets::tss_selector() as u64;
+        let ptr = (high_va_page1 + offset) as *mut u16;
+        core::ptr::write_volatile(ptr, interrupt_config.tss_selector);
+        debug_trampoline_println!(
+            "    tss_selector = 0x{:04x} (offset 0x{:x})",
+            interrupt_config.tss_selector,
+            offset
+        );
+
+        // Patch U->K trampoline data fields
+        debug_trampoline_println!("\n  U->K trampoline data:");
+
+        // kernel_cr3_value
+        let offset = trampolines::u2k_offsets::kernel_cr3_value() as u64;
+        let ptr = (high_va_page2 + offset) as *mut u64;
+        core::ptr::write_volatile(ptr, kernel_cr3_pa);
+        debug_trampoline_println!(
+            "    kernel_cr3 = 0x{:016x} (offset 0x{:x})",
+            kernel_cr3_pa,
+            offset
+        );
+
+        // u2k_rsp_save_addr in K2U: address where K2U should save kernel RSP
+        // This points to kernel_rsp_restore in U2K data section
+        let u2k_rsp_restore_offset = trampolines::u2k_offsets::kernel_rsp_restore() as u64;
+        let kernel_rsp_restore_addr = high_va_page2 + u2k_rsp_restore_offset;
+        let offset = trampolines::k2u_offsets::u2k_rsp_save_addr() as u64;
+        let ptr = (high_va_page1 + offset) as *mut u64;
+        core::ptr::write_volatile(ptr, kernel_rsp_restore_addr);
+        debug_trampoline_println!(
+            "    u2k_rsp_save_addr = 0x{:016x} (offset 0x{:x})",
+            kernel_rsp_restore_addr,
+            offset
+        );
+
+        // Memory barrier to ensure all writes are visible
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        // Flush TLB for trampoline pages to ensure no stale cached values
+        core::arch::asm!("invlpg [{}]", in(reg) high_va_page1, options(nostack));
+        core::arch::asm!("invlpg [{}]", in(reg) high_va_page2, options(nostack));
+    }
+    debug_trampoline_println!("  ✓ Trampoline data sections patched!\n");
 
     // Get current kernel CR3 for returning from user space
     let kernel_cr3: u64;
@@ -836,12 +936,83 @@ fn main() {
             "  TSS: base=0x{:x}, selector=0x{:x}",
             interrupt_config.tss_base, interrupt_config.tss_selector
         );
+
+        // Write trampoline addresses
+        // Using High VA for execution (needed for safe CR3 switching)
+        AP_TASK_INFO.write_k2u_trampoline(high_va_page1);
+
+        AP_TASK_INFO.write_u2k_trampoline(high_va_page2);
+        println!("✓ Trampoline addresses written to AP task info");
+        println!("  K->U trampoline: 0x{:016x}", high_va_page1);
+        println!("  U->K trampoline: 0x{:016x}", high_va_page2);
     }
     unsafe {
         AP_TASK_INFO.write_entry_point(elf_entry_point as u64);
     }
 
-    let task_info_ptr = unsafe { &AP_TASK_INFO as *const ApTaskInfo as u64 };
+    // DEBUG: Dump GDT and TSS memory to verify setup
+    unsafe {
+        println!("\n=== DEBUG: Verifying GDT/TSS Memory ===");
+        let gdt_base = interrupt_config.gdt_base;
+        let gdt_ptr = gdt_base as *const u64;
+        println!("  GDT Base (KVA): 0x{:x}", gdt_base);
+
+        // Verify physical address of GDT page
+        let gdt_page_kva = (gdt_base as u64) & !0xFFF;
+        if let Some(gdt_page_pa) = user_pagetable::virt_to_phys(gdt_page_kva) {
+            println!(
+                "  GDT Page KVA 0x{:x} -> PA 0x{:x}",
+                gdt_page_kva, gdt_page_pa
+            );
+        } else {
+            println!("  ERROR: GDT Page KVA 0x{:x} not mapped!", gdt_page_kva);
+        }
+
+        // GDT has 10 entries (80 bytes).
+        for i in 0..10 {
+            println!("    Entry {}: 0x{:016x}", i, *gdt_ptr.add(i));
+        }
+
+        // Dump first 8 bytes of GDT[0x28] (TSS descriptor)
+        let tss_desc_ptr = (gdt_base + 0x28) as *const u8;
+        print!("    GDT[0x28] bytes via KVA: ");
+        for i in 0..8 {
+            print!("{:02x} ", *tss_desc_ptr.add(i));
+        }
+        println!();
+
+        // Also read via direct-map (physical address) to verify physical memory content
+        if let Some(gdt_pa) = user_pagetable::virt_to_phys(gdt_base as u64) {
+            println!("    GDT KVA 0x{:x} -> PA 0x{:x}", gdt_base, gdt_pa);
+            let directmap_base: u64 = 0xffffff8000000000;
+            let tss_desc_pa = gdt_pa + 0x28; // GDT + 0x28 = TSS descriptor
+            let tss_desc_directmap = (directmap_base + tss_desc_pa) as *const u8;
+            print!("    GDT[0x28] bytes via PA 0x{:x}: ", tss_desc_pa);
+            for i in 0..8 {
+                print!("{:02x} ", *tss_desc_directmap.add(i));
+            }
+            println!();
+        }
+
+        let ind = interrupt_config.gdt_limit; // verify limit matches size
+        println!("  GDT Limit: {}", ind);
+
+        // Verify TSS memory
+        let tss_base_addr = interrupt_config.tss_base;
+        let tss_ptr = tss_base_addr as *const u64;
+        println!("  TSS Base: 0x{:x}", tss_base_addr);
+        // Dump first few qwords
+        println!("    TSS[0] (reserved): 0x{:016x}", *tss_ptr.add(0));
+        println!("    TSS[1] (RSP0):     0x{:016x}", *tss_ptr.add(1));
+        println!("    TSS[2] (RSP1):     0x{:016x}", *tss_ptr.add(2));
+        println!("    TSS[3] (RSP2):     0x{:016x}", *tss_ptr.add(3));
+        println!("    TSS[4] (IST1..):   0x{:016x}", *tss_ptr.add(4)); // 0x24 IST1
+        println!("    TSS[12] (I/O Map): 0x{:016x}", *tss_ptr.add(12)); // 0x60..68
+
+        println!("=== DEBUG END ===\n");
+    }
+
+    let task_info_ptr = unsafe { &raw const AP_TASK_INFO as *const ApTaskInfo as u64 };
     println!("✓ AP task info at: 0x{:x}", task_info_ptr);
     println!();
 
@@ -852,9 +1023,9 @@ fn main() {
 
     // Step 4: Setup boot trampoline
     // Use Unikraft's direct-map region to access physical memory
-    println!("Setting up trampoline:");
-    println!("  Physical address: 0x{:x}", TRAMPOLINE_PHYS_ADDR);
-    println!("  Direct-map virtual address: 0x{:x}", TRAMPOLINE_VIRT_ADDR);
+    debug_ap_println!("Setting up trampoline:");
+    debug_ap_println!("  Physical address: 0x{:x}", TRAMPOLINE_PHYS_ADDR);
+    debug_ap_println!("  Direct-map virtual address: 0x{:x}", TRAMPOLINE_VIRT_ADDR);
     let trampoline = BootTrampoline::new(TRAMPOLINE_VIRT_ADDR);
 
     unsafe {
@@ -862,7 +1033,7 @@ fn main() {
         if let Err(e) = trampoline.copy_to_target() {
             panic!("Failed to copy trampoline: {}", e);
         }
-        println!(
+        debug_ap_println!(
             "Boot trampoline copied via direct-map to physical 0x{:x}",
             TRAMPOLINE_PHYS_ADDR
         );
@@ -870,65 +1041,68 @@ fn main() {
         // Verify the copy by reading back the first few bytes from direct-map
         let verify_ptr = TRAMPOLINE_VIRT_ADDR as *const u8;
         let first_bytes = core::slice::from_raw_parts(verify_ptr, 16);
-        println!(
+        debug_ap_println!(
             "First 16 bytes at direct-map 0x{:x}: {:02x?}",
-            TRAMPOLINE_VIRT_ADDR, first_bytes
+            TRAMPOLINE_VIRT_ADDR,
+            first_bytes
         );
 
         // Verify it starts with our 'out' instruction: mov al, 'A' (b0 41)
         if first_bytes[0] == 0xb0 && first_bytes[1] == 0x41 {
-            println!("✓ Trampoline verified - starts with mov al, 'A'");
+            debug_ap_println!("✓ Trampoline verified - starts with mov al, 'A'");
         } else {
-            println!("⚠ WARNING: Unexpected bytes (expected b0 41...)");
+            debug_ap_println!("⚠ WARNING: Unexpected bytes (expected b0 41...)");
         }
 
         // Apply runtime relocations
         if let Err(e) = trampoline.apply_relocations() {
             panic!("Failed to apply relocations: {}", e);
         }
-        println!("Relocations applied");
+        debug_ap_println!("Relocations applied");
 
         // Set page table address (get from CR3)
         let cr3: u64;
         asm!("mov {}, cr3", out(reg) cr3);
 
-        println!("BSP's current CR3: 0x{:x}", cr3);
+        debug_ap_println!("BSP's current CR3: 0x{:x}", cr3);
 
         // CRITICAL: Add identity mapping for trampoline (0x0-0x200000 covers first 2MB)
         // The AP needs this when it enables paging in 32-bit mode
-        println!("Adding identity mapping for trampoline in page tables...");
+        debug_ap_println!("Adding identity mapping for trampoline in page tables...");
         add_identity_mapping(cr3, 0x0, 0x200000); // Map first 2MB identity
-        println!("✓ Identity mapping added: 0x0-0x200000 -> 0x0-0x200000");
+        debug_ap_println!("✓ Identity mapping added: 0x0-0x200000 -> 0x0-0x200000");
 
         trampoline.set_page_table(cr3);
-        println!("Page table set: 0x{:x}", cr3);
+        debug_ap_println!("Page table set: 0x{:x}", cr3);
 
         // Step 4: Initialize per-CPU data structures
         for i in 1..cpu_count {
             // EXPERIMENT: Use stack in low memory (identity-mapped region)
-            // Allocate at 0x7000 (just before our trampoline at 0x8000)
-            let stack_base = 0x7000 - (i as u64 * STACK_SIZE as u64);
-            let stack = stack_base;
-            println!("  CPU {} stack in low memory: 0x{:x}", i, stack);
+            // Use 0x90000 (below EBDA) for stack to ensure enough space
+            // Stack grows DOWN.
+            // CPU 1 stack top at 0x90000. Grows to 0x8C000.
+            let stack_top = 0x90000 - ((i - 1) as u64 * STACK_SIZE as u64);
+            let stack = stack_top;
+            debug_ap_println!("  CPU {} stack in low memory: 0x{:x}", i, stack);
 
             // Get APIC ID (for simplicity, assume APIC ID == CPU index)
             let apic_id = i as u64;
 
             // Set entry point to our AP entry function
             let entry = ap_entry as *const () as u64;
-            println!("  Entry address for CPU {}: 0x{:x}", i, entry);
+            debug_ap_println!("  Entry address for CPU {}: 0x{:x}", i, entry);
 
             if let Err(e) = trampoline.init_cpu(i as u32, apic_id, entry, stack, task_info_ptr) {
                 panic!("Failed to initialize CPU {}: {}", i, e);
             }
-            println!("Initialized CPU {} (APIC ID {})", i, apic_id);
+            debug_ap_println!("Initialized CPU {} (APIC ID {})", i, apic_id);
         }
 
         // Step 5: Start all secondary CPUs
         for i in 1..cpu_count {
             let apic_id = i as u32;
 
-            println!("Starting CPU {}...", i);
+            debug_ap_println!("Starting CPU {}...", i);
 
             // Send INIT IPI (assert)
             x2apic_send_iipi(apic_id);
@@ -938,14 +1112,15 @@ fn main() {
             cpu_startup::deassert_init_ipi(apic_id);
             delay_ms(1); // Give it a bit more time
 
-            println!("  About to send SIPI...");
+            debug_ap_println!("  About to send SIPI...");
 
             // Send SIPI (twice as per Intel specification)
             // SIPI uses PHYSICAL address, so use TRAMPOLINE_PHYS_ADDR
             let vector = (TRAMPOLINE_PHYS_ADDR >> 12) as u8;
-            println!(
+            debug_ap_println!(
                 "  SIPI vector: 0x{:x} (physical addr=0x{:x})",
-                vector, TRAMPOLINE_PHYS_ADDR
+                vector,
+                TRAMPOLINE_PHYS_ADDR
             );
             x2apic_send_sipi(TRAMPOLINE_PHYS_ADDR, apic_id);
             delay_us(200);
@@ -957,44 +1132,45 @@ fn main() {
                 let state = trampoline.get_cpu_state(i);
                 if state != 0 {
                     delay_ms(1000);
-                    println!("  CPU {} came online! State: {}", i, state);
+                    debug_ap_println!("  CPU {} came online! State: {}", i, state);
                     break;
                 }
                 if retry == 99 {
-                    println!(
+                    debug_ap_println!(
                         "  WARNING: CPU {} did not respond after 1 second (state={})",
-                        i, state
+                        i,
+                        state
                     );
                 }
             }
         }
 
-        println!("All CPUs started!");
+        debug_ap_println!("All CPUs started!");
 
         // Monitor AP task execution
-        println!("\n=== Monitoring AP Task Execution ===");
+        debug_ap_println!("\n=== Monitoring AP Task Execution ===");
         for retry in 0..200 {
             delay_ms(10);
             let status = AP_TASK_INFO.read_status();
             match status {
                 0 => {
                     if retry % 10 == 0 {
-                        println!("Waiting for AP to start ELF execution...");
+                        debug_ap_println!("Waiting for AP to start ELF execution...");
                     }
                 }
                 1 => {
-                    println!("✓ AP is executing ELF...");
+                    // debug_ap_println!("✓ AP is executing ELF...");
                 }
                 2 => {
-                    println!("✓ AP completed ELF execution!");
+                    debug_ap_println!("✓ AP completed ELF execution!");
                     break;
                 }
                 _ => {
-                    println!("⚠ Unknown status: {}", status);
+                    debug_ap_println!("⚠ Unknown status: {}", status);
                 }
             }
             if retry == 199 {
-                println!("⚠ Timeout waiting for AP task completion");
+                debug_ap_println!("⚠ Timeout waiting for AP task completion");
             }
         }
     }

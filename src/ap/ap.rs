@@ -80,22 +80,20 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
                 asm!("hlt");
             }
         }
-        ap_println!("reading entry point from shared memory...");
+        ap_println!("Reading task info from shared memory...");
         let task_info = &*task_info_ptr;
         let elf_entry = task_info.read_entry_point();
-        ap_println!(
-            "Read ELF entry point from shared memory: 0x{:016x}",
-            elf_entry
-        );
+        ap_println!("  User code entry point: 0x{:016x}", elf_entry);
 
         // Read user space CR3 from shared memory
         let user_cr3 = task_info.read_user_cr3();
-        ap_println!("User CR3: 0x{:016x}", user_cr3);
+        ap_println!("  User CR3: 0x{:016x}", user_cr3);
 
-        // // Load user page tables if CR3 is set
-        // if user_cr3 != 0 {
-        //     load_user_page_tables(user_cr3);
-        // }
+        // Read trampoline addresses
+        let k2u_trampoline = task_info.read_k2u_trampoline();
+        let u2k_trampoline = task_info.read_u2k_trampoline();
+        ap_println!("  K->U trampoline: 0x{:016x}", k2u_trampoline);
+        ap_println!("  U->K trampoline: 0x{:016x}", u2k_trampoline);
 
         if elf_entry == 0 {
             ap_println!("ERROR: No ELF entry point set");
@@ -104,22 +102,180 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
             }
         }
 
+        if k2u_trampoline == 0 {
+            ap_println!("ERROR: K->U trampoline address not set");
+            loop {
+                asm!("hlt");
+            }
+        }
+
         // Mark task as running
         task_info.write_status(1);
         ap_println!("Task status set to RUNNING");
+        ap_println!();
 
-        // Execute the ELF entry point
-        // Cast to function pointer and call it
-        // let elf_fn: extern "C" fn() -> () = core::mem::transmute(elf_entry as usize);
-        // ap_println!("executing elf...");
-        // TODO elf is not PIE and needs to be loaded at specific address
-        // elf_fn();
+        // Execute user code via K->U trampoline
+        // NOTE: GDT/IDT/TSS are NOT loaded here - the trampoline will load them
+        // The trampoline will:
+        // 1. Save kernel RSP
+        // 2. Load user CR3
+        // 3. Load GDT/IDT/TSS (now accessible in user CR3)
+        // 4. Set up user stack
+        // 5. Jump to user code entry point
+        // User code will trigger INT 32, which will call U->K trampoline to return here
+
+        ap_println!("==========================================================");
+        ap_println!("Calling K->U trampoline at 0x{:016x}", k2u_trampoline);
+        ap_println!("Expected flow:");
+        ap_println!("  1. Trampoline outputs 'K' (before CR3 switch)");
+        ap_println!("  2. Trampoline outputs '>' (after CR3 switch)");
+        ap_println!("  3. Trampoline outputs 'U' (before jump to user)");
+        ap_println!("  4. User code outputs 'U' (from user space)");
+        ap_println!("  5. User code triggers INT 32");
+        ap_println!("  6. U->K trampoline outputs 'X' (before CR3 switch)");
+        ap_println!("  7. U->K trampoline outputs '<' (after CR3 switch)");
+        ap_println!("  8. U->K trampoline outputs 'K' (after returning)");
+        ap_println!("==========================================================");
+        ap_println!();
+
+        // DEBUG: Dump K->U trampoline data section from Rust to verify endianness
+        ap_println!("DEBUG: K->U trampoline data section (from Rust):");
+        unsafe {
+            // Data section is at k2u_data_start which is at offset within trampoline
+            // We need to read 9 quads: kernel_rsp, user_cr3, gdt_desc[2], idt_desc[2], tss, user_stack, user_entry
+            let data_start =
+                k2u_trampoline + crate::trampolines::k2u_offsets::kernel_rsp_save() as u64;
+            let data_ptr = data_start as *const u64;
+
+            ap_println!("  Data start address: 0x{:016x}", data_start);
+            ap_println!(
+                "  [0] kernel_rsp_save:  0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(0))
+            );
+            ap_println!(
+                "  [1] user_cr3_value:   0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(1))
+            );
+            ap_println!(
+                "  [2] gdt_desc[0]:      0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(2))
+            );
+            ap_println!(
+                "  [3] gdt_desc[1]:      0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(3))
+            );
+            ap_println!(
+                "  [4] idt_desc[0]:      0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(4))
+            );
+            ap_println!(
+                "  [5] idt_desc[1]:      0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(5))
+            );
+            ap_println!(
+                "  [6] tss_selector:     0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(6))
+            );
+            ap_println!(
+                "  [7] user_stack_top:   0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(7))
+            );
+            ap_println!(
+                "  [8] user_entry_point: 0x{:016x}",
+                core::ptr::read_volatile(data_ptr.add(8))
+            );
+        }
+        ap_println!();
+
+        // Call the K->U trampoline
+        // NOTE: This looks like it returns, but it actually jumps to user code.
+        // The "return" comes from U->K trampoline after INT 32.
+
+        // Ensure TLB is flushed for the trampoline mapping
+        unsafe {
+            let cr3: u64;
+            asm!("mov {}, cr3", out(reg) cr3);
+            asm!("mov cr3, {}", in(reg) cr3);
+        }
+
+        // Verify code at trampoline address
+        let code_ptr = k2u_trampoline as *const u8;
+        unsafe {
+            ap_println!(
+                "DEBUG: Code at 0x{:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                k2u_trampoline,
+                core::ptr::read_volatile(code_ptr),
+                core::ptr::read_volatile(code_ptr.add(1)),
+                core::ptr::read_volatile(code_ptr.add(2)),
+                core::ptr::read_volatile(code_ptr.add(3)),
+                core::ptr::read_volatile(code_ptr.add(4)),
+                core::ptr::read_volatile(code_ptr.add(5)),
+                core::ptr::read_volatile(code_ptr.add(6)),
+                core::ptr::read_volatile(code_ptr.add(7))
+            );
+
+            // FORCE SERIAL FLUSH by waiting
+            for _ in 0..1000000 {
+                asm!("nop")
+            }
+
+            // DIRECT DEBUG PRINT
+            ap_println!("DEBUG: Executing direct UART write '!' to confirm liveness...");
+            asm!("mov dx, 0x3f8", "mov al, '!'", "out dx, al");
+
+            ap_println!("DEBUG: Invoking function pointer...");
+            for _ in 0..1000000 {
+                asm!("nop")
+            }
+        }
+
+        let trampoline_fn: extern "C" fn() = core::mem::transmute(k2u_trampoline);
+        trampoline_fn();
+
+        // IMMEDIATE marker after trampoline returns
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3f8",
+                "mov al, 0x0A", // newline
+                "out dx, al",
+                "mov al, 0x24", // $ marker = we returned!
+                "out dx, al",
+                "mov al, 0x24",
+                "out dx, al",
+                "mov al, 0x24",
+                "out dx, al",
+                "mov al, 0x0A", // newline
+                "out dx, al",
+            );
+        }
+
+        // If we get here, we've returned from user space via U->K trampoline!
+        ap_println!();
+        ap_println!("==========================================================");
+        ap_println!("✓ SUCCESS! Returned from user space!");
+        ap_println!("==========================================================");
+        ap_println!("What just happened:");
+        ap_println!("  1. K->U trampoline switched to user CR3");
+        ap_println!(
+            "  2. K->U trampoline jumped to user code at 0x{:x}",
+            elf_entry
+        );
+        ap_println!("  3. User code ran and triggered INT 32");
+        ap_println!(
+            "  4. INT 32 handler jumped to U->K trampoline at 0x{:016x}",
+            u2k_trampoline
+        );
+        ap_println!("  5. U->K trampoline switched back to kernel CR3");
+        ap_println!("  6. U->K trampoline restored kernel RSP and returned here!");
+        ap_println!("==========================================================");
+        ap_println!();
 
         // Mark task as done
         task_info.write_status(2);
-        ap_println!("CPU {} completed ELF execution", cpu_id);
+        ap_println!("✓ CPU {} completed task successfully", cpu_id);
 
         // Wait for more work (simplified - just halt)
+        ap_println!("Halting CPU {}...", cpu_id);
         loop {
             asm!("hlt");
         }
@@ -298,10 +454,23 @@ unsafe fn setup_exception_handlers() {
 
     // Set up handlers for common exceptions (DPL=0, kernel only)
     AP_IDT[0].set_handler(exception_handler_0, 0); // Divide by zero
+    AP_IDT[1].set_handler(exception_handler_1, 0); // Debug
+    AP_IDT[2].set_handler(exception_handler_2, 0); // NMI
+    AP_IDT[3].set_handler(exception_handler_3, 0); // Breakpoint
+    AP_IDT[4].set_handler(exception_handler_4, 0); // Overflow
+    AP_IDT[5].set_handler(exception_handler_5, 0); // Bound range exceeded
     AP_IDT[6].set_handler(exception_handler_6, 0); // Invalid opcode
+    AP_IDT[7].set_handler(exception_handler_7, 0); // Device not available
     AP_IDT[8].set_handler(exception_handler_8, 0); // Double fault
+    AP_IDT[10].set_handler(exception_handler_10, 0); // Invalid TSS
+    AP_IDT[11].set_handler(exception_handler_11, 0); // Segment not present
+    AP_IDT[12].set_handler(exception_handler_12, 0); // Stack-segment fault
     AP_IDT[13].set_handler(exception_handler_13, 0); // General protection fault
     AP_IDT[14].set_handler(exception_handler_14, 0); // Page fault
+    AP_IDT[16].set_handler(exception_handler_16, 0); // x87 FPU error
+    AP_IDT[17].set_handler(exception_handler_17, 0); // Alignment check
+    AP_IDT[18].set_handler(exception_handler_18, 0); // Machine check
+    AP_IDT[19].set_handler(exception_handler_19, 0); // SIMD exception
 
     // User exit handler (interrupt 32) - DPL=3 (user accessible)
     AP_IDT[32].set_handler(user_exit_handler, 3);
@@ -404,6 +573,96 @@ unsafe extern "C" fn exception_handler_13() {
 }
 
 #[no_mangle]
+unsafe extern "C" fn exception_handler_1() {
+    ap_println!("\n!!! EXCEPTION #1: Debug !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_2() {
+    ap_println!("\n!!! EXCEPTION #2: NMI !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_3() {
+    ap_println!("\n!!! EXCEPTION #3: Breakpoint !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_4() {
+    ap_println!("\n!!! EXCEPTION #4: Overflow !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_5() {
+    ap_println!("\n!!! EXCEPTION #5: Bound Range Exceeded !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_7() {
+    ap_println!("\n!!! EXCEPTION #7: Device Not Available !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_10() {
+    ap_println!("\n!!! EXCEPTION #10: Invalid TSS !!!");
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!("Error code: 0x{:016x}", error_code);
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_11() {
+    ap_println!("\n!!! EXCEPTION #11: Segment Not Present !!!");
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!("Error code: 0x{:016x}", error_code);
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_12() {
+    ap_println!("\n!!! EXCEPTION #12: Stack-Segment Fault !!!");
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!("Error code: 0x{:016x}", error_code);
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
 unsafe extern "C" fn exception_handler_14() {
     ap_println!("\n!!! EXCEPTION #14: Page Fault !!!");
     // Read CR2 (faulting address)
@@ -420,6 +679,45 @@ unsafe extern "C" fn exception_handler_14() {
         (error_code >> 1) & 1,
         (error_code >> 2) & 1
     );
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_16() {
+    ap_println!("\n!!! EXCEPTION #16: x87 FPU Error !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_17() {
+    ap_println!("\n!!! EXCEPTION #17: Alignment Check !!!");
+    let error_code: u64;
+    asm!("mov {}, [rsp]", out(reg) error_code);
+    ap_println!("Error code: 0x{:016x}", error_code);
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_18() {
+    ap_println!("\n!!! EXCEPTION #18: Machine Check !!!");
+    loop {
+        asm!("cli");
+        asm!("hlt");
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn exception_handler_19() {
+    ap_println!("\n!!! EXCEPTION #19: SIMD Exception !!!");
     loop {
         asm!("cli");
         asm!("hlt");

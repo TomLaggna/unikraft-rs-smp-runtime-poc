@@ -15,11 +15,13 @@ pub use ap::ap_entry;
 /// - No concurrent writes, so no locking needed
 #[repr(C, align(64))]
 pub struct ApTaskInfo {
-    pub entry_point: u64, // Entry point address for AP to execute
-    pub user_cr3: u64,    // Physical address of user space PML4 (for CR3)
-    pub kernel_cr3: u64,  // Physical address of kernel PML4 (for returning from user space)
-    pub status: u8,       // 0=idle, 1=running, 2=done
-    _padding1: [u8; 7],   // Padding before interrupt config
+    pub entry_point: u64,    // Entry point address for AP to execute (user code)
+    pub user_cr3: u64,       // Physical address of user space PML4 (for CR3)
+    pub kernel_cr3: u64,     // Physical address of kernel PML4 (for returning from user space)
+    pub k2u_trampoline: u64, // Virtual address of Kernel->User trampoline
+    pub u2k_trampoline: u64, // Virtual address of User->Kernel trampoline
+    pub status: u8,          // 0=idle, 1=running, 2=done
+    _padding1: [u8; 7],      // Padding before interrupt config
     // Interrupt configuration for user space
     pub gdt_base: u64,     // Virtual address of GDT in guest_mem
     pub gdt_limit: u16,    // GDT size - 1
@@ -38,6 +40,8 @@ impl ApTaskInfo {
             entry_point: 0,
             user_cr3: 0,
             kernel_cr3: 0,
+            k2u_trampoline: 0,
+            u2k_trampoline: 0,
             status: 0,
             _padding1: [0; 7],
             gdt_base: 0,
@@ -163,5 +167,29 @@ impl ApTaskInfo {
             let selector = ptr::read_volatile(&raw const self.tss_selector as *const u16);
             (base, selector)
         }
+    }
+
+    /// BSP writes K->U trampoline address
+    pub fn write_k2u_trampoline(&self, addr: u64) {
+        unsafe {
+            ptr::write_volatile(&raw const self.k2u_trampoline as *mut u64, addr);
+        }
+    }
+
+    /// BSP writes U->K trampoline address
+    pub fn write_u2k_trampoline(&self, addr: u64) {
+        unsafe {
+            ptr::write_volatile(&raw const self.u2k_trampoline as *mut u64, addr);
+        }
+    }
+
+    /// AP reads K->U trampoline address
+    pub fn read_k2u_trampoline(&self) -> u64 {
+        unsafe { ptr::read_volatile(&raw const self.k2u_trampoline as *const u64) }
+    }
+
+    /// AP reads U->K trampoline address
+    pub fn read_u2k_trampoline(&self) -> u64 {
+        unsafe { ptr::read_volatile(&raw const self.u2k_trampoline as *const u64) }
     }
 }
