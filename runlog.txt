@@ -13,7 +13,7 @@ KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
  i  #1 DONE 0.0s
  i  
  i  #2 [internal] load metadata for docker.io/library/rust:1.91-bookworm
- i  #2 DONE 1.0s
+ i  #2 DONE 2.2s
  i  
  i  #3 [internal] load .dockerignore
  i  #3 transferring context: 2B done
@@ -24,49 +24,1360 @@ KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
  i  #4 DONE 0.0s
  i  
  i  #5 [internal] load build context
- i  #5 transferring context: 1.18kB done
+ i  #5 transferring context: 98.63kB done
  i  #5 DONE 0.0s
  i  
- i  #6 [stage-1 1/5] COPY --from=build /target/x86_64-unknown-linux-musl/release/smp-poc /smp-poc
+ i  #6 [build  2/12] RUN apt-get update && apt-get install -y     gcc     make     binutils     && rm -rf /var/lib/apt/lists/*
  i  #6 CACHED
  i  
- i  #7 [stage-1 4/5] COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+ i  #7 [build  3/12] COPY ./.cargo ./.cargo
  i  #7 CACHED
  i  
- i  #8 [stage-1 3/5] COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
- i  #8 CACHED
+ i  #8 [build  4/12] COPY ./src ./src
+ i  #8 DONE 0.1s
  i  
- i  #9 [build 12/12] RUN cargo build --release --target x86_64-unknown-linux-musl --bin smp-poc
- i  #9 CACHED
+ i  #9 [build  5/12] COPY ./Cargo.toml ./Cargo.toml
+ i  #9 DONE 0.0s
  i  
- i  #10 [build  3/12] COPY ./.cargo ./.cargo
- i  #10 CACHED
+ i  #10 [build  6/12] COPY ./Cargo.lock ./Cargo.lock
+ i  #10 DONE 0.0s
  i  
- i  #11 [build  4/12] COPY ./src ./src
- i  #11 CACHED
+ i  #11 [build  7/12] COPY ./Makefile ./Makefile
+ i  #11 DONE 0.0s
  i  
- i  #12 [build  7/12] COPY ./Makefile ./Makefile
- i  #12 CACHED
+ i  #12 [build  8/12] COPY ./tls_linker.ld ./tls_linker.ld
+ i  #12 DONE 0.0s
  i  
  i  #13 [build  9/12] COPY ./elf ./elf
- i  #13 CACHED
+ i  #13 DONE 0.1s
  i  
- i  #14 [build  5/12] COPY ./Cargo.toml ./Cargo.toml
- i  #14 CACHED
+ i  #14 [build 10/12] RUN rustup target add x86_64-unknown-linux-musl
+ i  #14 0.297 info: downloading component 'rust-std' for 'x86_64-unknown-linux-musl'
+ i  #14 5.054 info: installing component 'rust-std' for 'x86_64-unknown-linux-musl'
+ i  #14 DONE 8.1s
  i  
- i  #15 [build  6/12] COPY ./Cargo.lock ./Cargo.lock
- i  #15 CACHED
+ i  #15 [build 11/12] RUN make asm
+ i  #15 0.075 Compiling boot trampoline assembly...
+ i  #15 0.075 gcc -c -m64 -nostdlib -fno-pic -fno-stack-protector -mno-red-zone -Isrc/boot -o build/boot_trampoline.o src/boot/boot_trampoline.S
+ i  #15 0.140 In file included from src/boot/boot_trampoline.S:13:
+ i  #15 0.140 src/boot/boot_defs.h:150:9: warning: missing whitespace after the macro name
+ i  #15 0.140   150 | #define GDT_SEL_KERN_CODE\t0x08\t/* Kernel code segment (index 1, RPL=0) */
+ i  #15 0.140       |         ^~~~~~~~~~~~~~~~~
+ i  #15 0.140 src/boot/boot_defs.h:151:9: warning: missing whitespace after the macro name
+ i  #15 0.140   151 | #define GDT_SEL_KERN_DATA\t0x10\t/* Kernel data segment (index 2, RPL=0) */
+ i  #15 0.140       |         ^~~~~~~~~~~~~~~~~
+ i  #15 0.140 src/boot/boot_defs.h:152:9: warning: missing whitespace after the macro name
+ i  #15 0.140   152 | #define GDT_SEL_USER_CODE\t0x1B\t/* User code segment (index 3, RPL=3) */
+ i  #15 0.140       |         ^~~~~~~~~~~~~~~~~
+ i  #15 0.140 src/boot/boot_defs.h:153:9: warning: missing whitespace after the macro name
+ i  #15 0.140   153 | #define GDT_SEL_USER_DATA\t0x23\t/* User data segment (index 4, RPL=3) */
+ i  #15 0.140       |         ^~~~~~~~~~~~~~~~~
+ i  #15 0.154 Linking boot trampoline ELF...
+ i  #15 0.154 gcc -nostdlib -no-pie -static -Tsrc/boot/boot_trampoline.ld -o build/boot_trampoline.elf build/boot_trampoline.o
+ i  #15 0.164 /usr/bin/ld: warning: build/boot_trampoline.elf has a LOAD segment with RWX permissions
+ i  #15 0.164 /usr/bin/ld: warning: .note.gnu.build-id section discarded, --build-id ignored
+ i  #15 0.165 Extracting boot trampoline binary...
+ i  #15 0.166 objcopy -O binary build/boot_trampoline.elf build/boot_trampoline.bin
+ i  #15 0.168   Sections:
+ i  #15 0.174 Idx Name          Size      VMA               LMA               File off  Algn
+ i  #15 0.174   0 .boot         00002440  0000000000008000  0000000000008000  00001000  2**12
+ i  #15 0.177 ✓ Boot trampoline binary ready: build/boot_trampoline.bin (9280 bytes)
+ i  #15 DONE 0.2s
  i  
- i  #16 [build  2/12] RUN apt-get update && apt-get install -y     gcc     make     binutils     && rm -rf /var/lib/apt/lists/*
- i  #16 CACHED
+ i  #16 [build 12/12] RUN cargo build --release --target x86_64-unknown-linux-musl --bin smp-poc
+ i  #16 0.367     Updating crates.io index
+ i  #16 1.176  Downloading crates ...
+ i  #16 1.272   Downloaded bitflags v1.3.2
+ i  #16 1.280   Downloaded bit_field v0.10.3
+ i  #16 1.321   Downloaded raw-cpuid v10.7.0
+ i  #16 1.677   Downloaded x86 v0.52.0
+ i  #16 1.759    Compiling x86 v0.52.0
+ i  #16 1.759    Compiling bitflags v1.3.2
+ i  #16 1.759    Compiling bit_field v0.10.3
+ i  #16 1.813    Compiling raw-cpuid v10.7.0
+ i  #16 3.287    Compiling smp-poc v0.1.0 (/)
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344   --> src/dandelion_commons/records.rs:51:7
+ i  #16 3.344    |
+ i  #16 3.344 51 | #[cfg(feature = "timestamp")]
+ i  #16 3.344    |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344    |
+ i  #16 3.344    = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344    = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344    = note: `#[warn(unexpected_cfgs)]` on by default
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344   --> src/dandelion_commons/records.rs:58:7
+ i  #16 3.344    |
+ i  #16 3.344 58 | #[cfg(feature = "timestamp")]
+ i  #16 3.344    |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344    |
+ i  #16 3.344    = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344    = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344   --> src/dandelion_commons/records.rs:60:7
+ i  #16 3.344    |
+ i  #16 3.344 60 | #[cfg(feature = "timestamp")]
+ i  #16 3.344    |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344    |
+ i  #16 3.344    = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344    = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344   --> src/dandelion_commons/records.rs:63:7
+ i  #16 3.344    |
+ i  #16 3.344 63 | #[cfg(feature = "timestamp")]
+ i  #16 3.344    |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344    |
+ i  #16 3.344    = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344    = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344   --> src/dandelion_commons/records.rs:89:7
+ i  #16 3.344    |
+ i  #16 3.344 89 | #[cfg(feature = "timestamp")]
+ i  #16 3.344    |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344    |
+ i  #16 3.344    = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344    = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:113:7
+ i  #16 3.344     |
+ i  #16 3.344 113 | #[cfg(feature = "timestamp")]
+ i  #16 3.344     |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:118:7
+ i  #16 3.344     |
+ i  #16 3.344 118 | #[cfg(feature = "timestamp")]
+ i  #16 3.344     |       ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:170:11
+ i  #16 3.344     |
+ i  #16 3.344 170 |     #[cfg(feature = "timestamp")]
+ i  #16 3.344     |           ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:177:19
+ i  #16 3.344     |
+ i  #16 3.344 177 |             #[cfg(feature = "timestamp")]
+ i  #16 3.344     |                   ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:184:19
+ i  #16 3.344     |
+ i  #16 3.344 184 |             #[cfg(feature = "timestamp")]
+ i  #16 3.344     |                   ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:190:15
+ i  #16 3.344     |
+ i  #16 3.344 190 |         #[cfg(feature = "timestamp")]
+ i  #16 3.344     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.344 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.344    --> src/dandelion_commons/records.rs:195:15
+ i  #16 3.344     |
+ i  #16 3.344 195 |         #[cfg(feature = "timestamp")]
+ i  #16 3.344     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.344     |
+ i  #16 3.344     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.344     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.344     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.344 
+ i  #16 3.345 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.345    --> src/dandelion_commons/records.rs:203:19
+ i  #16 3.345     |
+ i  #16 3.345 203 |             #[cfg(feature = "timestamp")]
+ i  #16 3.345     |                   ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.345     |
+ i  #16 3.345     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.345     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.345     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.345 
+ i  #16 3.345 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.345    --> src/dandelion_commons/records.rs:212:15
+ i  #16 3.345     |
+ i  #16 3.345 212 |         #[cfg(feature = "timestamp")]
+ i  #16 3.345     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.345     |
+ i  #16 3.345     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.345     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.345     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.345 
+ i  #16 3.345 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.345    --> src/dandelion_commons/records.rs:226:11
+ i  #16 3.345     |
+ i  #16 3.345 226 |     #[cfg(feature = "timestamp")]
+ i  #16 3.345     |           ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.345     |
+ i  #16 3.345     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.345     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.345     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.345 
+ i  #16 3.346 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.346    --> src/dandelion_commons/records.rs:231:11
+ i  #16 3.346     |
+ i  #16 3.346 231 |     #[cfg(feature = "timestamp")]
+ i  #16 3.346     |           ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.346     |
+ i  #16 3.346     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.346     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.346     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.346 
+ i  #16 3.346 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.346    --> src/dandelion_commons/records.rs:238:19
+ i  #16 3.346     |
+ i  #16 3.346 238 |             #[cfg(feature = "timestamp")]
+ i  #16 3.346     |                   ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.346     |
+ i  #16 3.346     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.346     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.346     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.346 
+ i  #16 3.346 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.346    --> src/dandelion_commons/records.rs:244:15
+ i  #16 3.346     |
+ i  #16 3.346 244 |         #[cfg(feature = "timestamp")]
+ i  #16 3.346     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.346     |
+ i  #16 3.346     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.346     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.346     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.346 
+ i  #16 3.346 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.346    --> src/dandelion_commons/records.rs:253:15
+ i  #16 3.346     |
+ i  #16 3.346 253 |         #[cfg(feature = "timestamp")]
+ i  #16 3.346     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.346     |
+ i  #16 3.346     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.346     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.346     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.346 
+ i  #16 3.346 warning: unexpected `cfg` condition value: `timestamp`
+ i  #16 3.346    --> src/dandelion_commons/records.rs:259:15
+ i  #16 3.346     |
+ i  #16 3.346 259 |         #[cfg(feature = "timestamp")]
+ i  #16 3.346     |               ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.346     |
+ i  #16 3.346     = note: expected values for `feature` are: `debug-all`, `debug-ap-boot`, `debug-trampoline`, `debug-user-mem`, and `default`
+ i  #16 3.346     = help: consider adding `timestamp` as a feature in `Cargo.toml`
+ i  #16 3.346     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+ i  #16 3.346 
+ i  #16 3.348 warning: unused imports: `debug_ap_println` and `debug_trampoline_println`
+ i  #16 3.348   --> src/user_pagetable.rs:18:13
+ i  #16 3.348    |
+ i  #16 3.348 18 | use crate::{debug_ap_println, debug_mem_println, debug_trampoline_println};
+ i  #16 3.348    |             ^^^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.348    |
+ i  #16 3.348    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+ i  #16 3.348 
+ i  #16 3.348 warning: unnecessary parentheses around assigned value
+ i  #16 3.348    --> src/user_pagetable.rs:837:22
+ i  #16 3.348     |
+ i  #16 3.348 837 |         let pt_idx = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.348     |                      ^                               ^
+ i  #16 3.348     |
+ i  #16 3.348     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+ i  #16 3.348 help: remove these parentheses
+ i  #16 3.348     |
+ i  #16 3.348 837 -         let pt_idx = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.348 837 +         let pt_idx = (user_stack_virt >> 12) & 0x1FF; // First page of stack
+ i  #16 3.348     |
+ i  #16 3.348 
+ i  #16 3.349 warning: unused imports: `walk_pt_with_flags` and `walk_pt`
+ i  #16 3.349  --> src/debug_utils.rs:4:33
+ i  #16 3.349   |
+ i  #16 3.349 4 | pub use crate::user_pagetable::{walk_pt, walk_pt_with_flags};
+ i  #16 3.349   |                                 ^^^^^^^  ^^^^^^^^^^^^^^^^^^
+ i  #16 3.349 
+ i  #16 3.349 warning: unused import: `debug_utils::*`
+ i  #16 3.349   --> src/main.rs:25:5
+ i  #16 3.349    |
+ i  #16 3.349 25 | use debug_utils::*;
+ i  #16 3.349    |     ^^^^^^^^^^^^^^
+ i  #16 3.349 
+ i  #16 3.349 warning: unused imports: `virt_to_phys` and `walk_pt`
+ i  #16 3.349   --> src/main.rs:43:22
+ i  #16 3.349    |
+ i  #16 3.349 43 | use user_pagetable::{virt_to_phys, walk_pt, walk_pt_with_flags};
+ i  #16 3.349    |                      ^^^^^^^^^^^^  ^^^^^^^
+ i  #16 3.349 
+ i  #16 3.506 warning: unused variable: `interrupt_total`
+ i  #16 3.506    --> src/user_pagetable.rs:471:13
+ i  #16 3.506     |
+ i  #16 3.506 471 |         let interrupt_total = interrupt_handler_code_bytes
+ i  #16 3.506     |             ^^^^^^^^^^^^^^^
+ i  #16 3.506     |
+ i  #16 3.506     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+ i  #16 3.506 help: if this is intentional, prefix it with an underscore
+ i  #16 3.506     |
+ i  #16 3.506 471 |         let _interrupt_total = interrupt_handler_code_bytes
+ i  #16 3.506     |             +
+ i  #16 3.506 help: you might have meant to pattern match on the similarly named constant `USER_SPACE_SIZE`
+ i  #16 3.506     |
+ i  #16 3.506 471 -         let interrupt_total = interrupt_handler_code_bytes
+ i  #16 3.506 471 +         let main::USER_SPACE_SIZE = interrupt_handler_code_bytes
+ i  #16 3.506     |
+ i  #16 3.506 
+ i  #16 3.506 warning: unused variable: `pml4_idx`
+ i  #16 3.506    --> src/user_pagetable.rs:834:13
+ i  #16 3.506     |
+ i  #16 3.506 834 |         let pml4_idx = (user_stack_virt >> 39) & 0x1FF;
+ i  #16 3.506     |             ^^^^^^^^
+ i  #16 3.506     |
+ i  #16 3.506 help: if this is intentional, prefix it with an underscore
+ i  #16 3.506     |
+ i  #16 3.506 834 |         let _pml4_idx = (user_stack_virt >> 39) & 0x1FF;
+ i  #16 3.506     |             +
+ i  #16 3.506 help: you might have meant to pattern match on the similarly named constant `USER_SPACE_SIZE`
+ i  #16 3.506     |
+ i  #16 3.506 834 -         let pml4_idx = (user_stack_virt >> 39) & 0x1FF;
+ i  #16 3.506 834 +         let main::USER_SPACE_SIZE = (user_stack_virt >> 39) & 0x1FF;
+ i  #16 3.506     |
+ i  #16 3.506 
+ i  #16 3.506 warning: unused variable: `pdpt_idx`
+ i  #16 3.506    --> src/user_pagetable.rs:835:13
+ i  #16 3.506     |
+ i  #16 3.506 835 |         let pdpt_idx = (user_stack_virt >> 30) & 0x1FF;
+ i  #16 3.506     |             ^^^^^^^^
+ i  #16 3.506     |
+ i  #16 3.506 help: if this is intentional, prefix it with an underscore
+ i  #16 3.506     |
+ i  #16 3.506 835 |         let _pdpt_idx = (user_stack_virt >> 30) & 0x1FF;
+ i  #16 3.506     |             +
+ i  #16 3.506 help: you might have meant to pattern match on the similarly named constant `USER_SPACE_SIZE`
+ i  #16 3.506     |
+ i  #16 3.506 835 -         let pdpt_idx = (user_stack_virt >> 30) & 0x1FF;
+ i  #16 3.506 835 +         let main::USER_SPACE_SIZE = (user_stack_virt >> 30) & 0x1FF;
+ i  #16 3.506     |
+ i  #16 3.506 
+ i  #16 3.506 warning: unused variable: `pd_idx`
+ i  #16 3.506    --> src/user_pagetable.rs:836:13
+ i  #16 3.506     |
+ i  #16 3.506 836 |         let pd_idx = (user_stack_virt >> 21) & 0x1FF;
+ i  #16 3.506     |             ^^^^^^
+ i  #16 3.506     |
+ i  #16 3.506 help: if this is intentional, prefix it with an underscore
+ i  #16 3.506     |
+ i  #16 3.506 836 |         let _pd_idx = (user_stack_virt >> 21) & 0x1FF;
+ i  #16 3.506     |             +
+ i  #16 3.506 help: you might have meant to pattern match on the similarly named constant `USER_SPACE_SIZE`
+ i  #16 3.506     |
+ i  #16 3.506 836 -         let pd_idx = (user_stack_virt >> 21) & 0x1FF;
+ i  #16 3.506 836 +         let main::USER_SPACE_SIZE = (user_stack_virt >> 21) & 0x1FF;
+ i  #16 3.506     |
+ i  #16 3.506 
+ i  #16 3.507 warning: unused variable: `pt_idx`
+ i  #16 3.507    --> src/user_pagetable.rs:837:13
+ i  #16 3.507     |
+ i  #16 3.507 837 |         let pt_idx = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.507     |             ^^^^^^
+ i  #16 3.507     |
+ i  #16 3.507 help: if this is intentional, prefix it with an underscore
+ i  #16 3.507     |
+ i  #16 3.507 837 |         let _pt_idx = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.507     |             +
+ i  #16 3.507 help: you might have meant to pattern match on the similarly named constant `USER_SPACE_SIZE`
+ i  #16 3.507     |
+ i  #16 3.507 837 -         let pt_idx = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.507 837 +         let main::USER_SPACE_SIZE = ((user_stack_virt >> 12) & 0x1FF); // First page of stack
+ i  #16 3.507     |
+ i  #16 3.507 
+ i  #16 3.545 warning: unnecessary `unsafe` block
+ i  #16 3.545    --> src/ap/ap.rs:143:9
+ i  #16 3.545     |
+ i  #16 3.545  27 |     unsafe {
+ i  #16 3.545     |     ------ because it's nested under this `unsafe` block
+ i  #16 3.545 ...
+ i  #16 3.545 143 |         unsafe {
+ i  #16 3.545     |         ^^^^^^ unnecessary `unsafe` block
+ i  #16 3.545     |
+ i  #16 3.545     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+ i  #16 3.545 
+ i  #16 3.545 warning: unnecessary `unsafe` block
+ i  #16 3.545    --> src/ap/ap.rs:195:9
+ i  #16 3.545     |
+ i  #16 3.545  27 |     unsafe {
+ i  #16 3.545     |     ------ because it's nested under this `unsafe` block
+ i  #16 3.545 ...
+ i  #16 3.545 195 |         unsafe {
+ i  #16 3.545     |         ^^^^^^ unnecessary `unsafe` block
+ i  #16 3.545 
+ i  #16 3.545 warning: unnecessary `unsafe` block
+ i  #16 3.545    --> src/ap/ap.rs:203:9
+ i  #16 3.545     |
+ i  #16 3.545  27 |     unsafe {
+ i  #16 3.545     |     ------ because it's nested under this `unsafe` block
+ i  #16 3.545 ...
+ i  #16 3.545 203 |         unsafe {
+ i  #16 3.545     |         ^^^^^^ unnecessary `unsafe` block
+ i  #16 3.545 
+ i  #16 3.545 warning: unnecessary `unsafe` block
+ i  #16 3.545    --> src/ap/ap.rs:236:9
+ i  #16 3.545     |
+ i  #16 3.545  27 |     unsafe {
+ i  #16 3.545     |     ------ because it's nested under this `unsafe` block
+ i  #16 3.545 ...
+ i  #16 3.545 236 |         unsafe {
+ i  #16 3.545     |         ^^^^^^ unnecessary `unsafe` block
+ i  #16 3.545 
+ i  #16 3.574 warning: unnecessary `unsafe` block
+ i  #16 3.574     --> src/main.rs:1015:25
+ i  #16 3.574      |
+ i  #16 3.574 1015 |     let task_info_ptr = unsafe { &raw const AP_TASK_INFO as *const ApTaskInfo as u64 };
+ i  #16 3.574      |                         ^^^^^^ unnecessary `unsafe` block
+ i  #16 3.574 
+ i  #16 3.598 warning: constant `PTE_USER` is never used
+ i  #16 3.598   --> src/main.rs:56:7
+ i  #16 3.598    |
+ i  #16 3.598 56 | const PTE_USER: u64 = 1 << 2;
+ i  #16 3.598    |       ^^^^^^^^
+ i  #16 3.598    |
+ i  #16 3.598    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+ i  #16 3.598 
+ i  #16 3.598 warning: function `get_current_cr3` is never used
+ i  #16 3.598    --> src/main.rs:536:8
+ i  #16 3.598     |
+ i  #16 3.598 536 |     fn get_current_cr3() -> u64 {
+ i  #16 3.598     |        ^^^^^^^^^^^^^^^
+ i  #16 3.598 
+ i  #16 3.598 warning: type alias `FunctionId` is never used
+ i  #16 3.598  --> src/dandelion_commons/mod.rs:4:10
+ i  #16 3.598   |
+ i  #16 3.598 4 | pub type FunctionId = u64;
+ i  #16 3.598   |          ^^^^^^^^^^
+ i  #16 3.598 
+ i  #16 3.599 warning: multiple variants are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:11:5
+ i  #16 3.599     |
+ i  #16 3.599   9 | pub enum DandelionError {
+ i  #16 3.599     |          -------------- variants in this enum
+ i  #16 3.599  10 |     /// errors related to the dispatcher
+ i  #16 3.599  11 |     Dispatcher(DispatcherError),
+ i  #16 3.599     |     ^^^^^^^^^^
+ i  #16 3.599  12 |     /// errors related to domains themselfs
+ i  #16 3.599  13 |     DomainError(DomainError),
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599  14 |     /// Error from a promise
+ i  #16 3.599  15 |     PromiseError(PromiseError),
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599  16 |     /// registry errors
+ i  #16 3.599  17 |     FunctionRegistryError(FunctionRegistryError),
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  18 |     /// Error in the frontend receiveing requests
+ i  #16 3.599  19 |     RequestError(FrontendError),
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599  20 |     /// Failures in user code or compositions
+ i  #16 3.599  21 |     UserError(UserError),
+ i  #16 3.599     |     ^^^^^^^^^
+ i  #16 3.599  22 |     /// trying to use a feature that is not yet implemented
+ i  #16 3.599  23 |     NotImplemented,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  29 |     CompositionParsingError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  30 |     /// parser did not find symbol that it was searching for
+ i  #16 3.599  31 |     UnknownSymbol,
+ i  #16 3.599     |     ^^^^^^^^^^^^^
+ i  #16 3.599  32 |     /// Composition contains function that does not exist
+ i  #16 3.599  33 |     CompositionContainsInvalidFunction(String),
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  34 |     /// Function in parsing has identifier that is not defined in composition
+ i  #16 3.599  35 |     CompositionFunctionInvalidIdentifier(String),
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  36 |     /// Set indentifier is produced by multiple functions in a composition
+ i  #16 3.599  37 |     CompositionDuplicateSetName,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  40 |     ContextReadOnlyLayout,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  41 |     /// context handed to context specific function was wrong type
+ i  #16 3.599  42 |     ContextMissmatch,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^
+ i  #16 3.599  43 |     /// domain could not be allocated because there is no space available
+ i  #16 3.599  44 |     OutOfMemory,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599  45 |     /// memory size is not allowed, e.g. Wasm memory must be <= 4GiB
+ i  #16 3.599  46 |     InvalidMemorySize,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599  47 |     /// the value specified for the context size does not match the WASM memory size
+ i  #16 3.599  48 |     WasmContextMemoryMismatch,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  49 |     /// error when trying to allocate memory
+ i  #16 3.599  50 |     MemoryAllocationError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  51 |     /// context can't fit additional memory
+ i  #16 3.599  52 |     ContextFull,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599  53 |     /// read buffer was misaligned for requested data type
+ i  #16 3.599  54 |     ReadMisaligned,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^
+ i  #16 3.599  55 |     /// tried to read from domain outside of domain bounds
+ i  #16 3.599  56 |     InvalidRead,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599  57 |     /// offset handed to writing was not aligned with type to write
+ i  #16 3.599  58 |     WriteMisaligned,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599  59 |     /// tried to write to domain ouside of domain bounds
+ i  #16 3.599  60 |     InvalidWrite,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599  61 |     /// found a case with a data item that is a set but has no entries
+ i  #16 3.599  62 |     EmptyDataSet,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599  63 |     /// tried to transfer a set index that is not in the content of the context
+ i  #16 3.599  64 |     TransferInputNoSetAvailable,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  65 |     /// tried to transfer to a data item that was already present
+ i  #16 3.599  66 |     TransferItemAlreadyPresent,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  67 |     /// error converting pointers or integers
+ i  #16 3.599  68 |     UsizeTypeConversionError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  69 |     /// context synchronization failed
+ i  #16 3.599  70 |     ContextSyncError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  73 |     ConfigMissmatch,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  76 |     EngineResourceError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  77 |     /// attempted abort when no function was running
+ i  #16 3.599  78 |     NoRunningFunction,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599  79 |     /// attempted to run on already busy engine
+ i  #16 3.599  80 |     EngineAlreadyRunning,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  81 |     /// there was a non recoverable issue with the engine
+ i  #16 3.599  82 |     EngineError,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599  83 |     /// asked driver for engine, but there are no more available
+ i  #16 3.599  84 |     NoEngineAvailable,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599  85 |     /// there was a non recoverable issue when spawning or running the MMU worker
+ i  #16 3.599  86 |     MmuWorkerError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  90 |     MalformedSystemFuncArg(String),
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  91 |     /// Argument given to system function was not valid
+ i  #16 3.599  92 |     InvalidSystemFuncArg(String),
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  93 |     /// System function did get unexpected response
+ i  #16 3.599  94 |     SystemFuncResponseError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599  95 |     /// Tried to call parser for system function
+ i  #16 3.599  96 |     CalledSystemFuncParser,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599  99 |     MemcachedError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 102 |     RecordLockFailure,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599 103 |     /// Call to record time spans were not called in order
+ i  #16 3.599 104 |     RecorderNotAvailable,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 107 |     FileError,
+ i  #16 3.599     |     ^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 110 |     UnauthorizedSyscall,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 111 |     /// the function triggered a memory protection fault
+ i  #16 3.599 112 |     SegmentationFault,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599 113 |     /// other protection errors caused by the function
+ i  #16 3.599 114 |     OtherProctionError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 115 |     /// Work queue from the dispatcher to the engines is full
+ i  #16 3.599 116 |     WorkQueueFull,
+ i  #16 3.599     |     ^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `DandelionError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: multiple variants are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:133:5
+ i  #16 3.599     |
+ i  #16 3.599 131 | pub enum DomainError {
+ i  #16 3.599     |          ----------- variants in this enum
+ i  #16 3.599 132 |     /// Config parameter does not match any expected option
+ i  #16 3.599 133 |     ConfigMissmatch,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599 134 |     /// Error opening shared memory file
+ i  #16 3.599 135 |     SharedOpen,
+ i  #16 3.599     |     ^^^^^^^^^^
+ i  #16 3.599 136 |     /// Error truncating shared memory
+ i  #16 3.599 137 |     SharedTrunc,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599 138 |     /// Error mapping the requested amount
+ i  #16 3.599 139 |     Mapping,
+ i  #16 3.599     |     ^^^^^^^
+ i  #16 3.599 140 |     /// Domain has no space left
+ i  #16 3.599 141 |     ReachedCapacity,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599 142 |     /// Cleaning of memory range has failed
+ i  #16 3.599 143 |     CleaningFailure,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599 144 |     /// Impossible context size for the given context type
+ i  #16 3.599 145 |     InvalidMemorySize,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `DomainError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: multiple variants are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:151:5
+ i  #16 3.599     |
+ i  #16 3.599 149 | pub enum DispatcherError {
+ i  #16 3.599     |          --------------- variants in this enum
+ i  #16 3.599 150 |     /// dispatcher does not find a loader for this engine type
+ i  #16 3.599 151 |     MissingLoader,
+ i  #16 3.599     |     ^^^^^^^^^^^^^
+ i  #16 3.599 152 |     /// error from resulting from assumptions based on config passed to dispatcher
+ i  #16 3.599 153 |     ConfigError,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599 154 |     /// dispatcher was asked to queue function it can't find
+ i  #16 3.599 155 |     UnavailableFunction,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 156 |     /// dispatcher was asked to add function to registry that is already present
+ i  #16 3.599 157 |     DuplicateFunction,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^
+ i  #16 3.599 158 |     /// function to register did not have metadata available
+ i  #16 3.599 159 |     MetaDataUnavailable,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 160 |     /// dispatcher encountered an issue when trasmitting data between tasks
+ i  #16 3.599 161 |     ChannelError,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599 162 |     /// dispatcher found set to transfer that has no registered name
+ i  #16 3.599 163 |     SetMissmatch,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599 164 |     /// dispatcher failed to combine two composition sets
+ i  #16 3.599 165 |     CompositionCombine,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 166 |     /// dispatcher found mistake when trying to find waiting functions
+ i  #16 3.599 167 |     DependencyError,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `DispatcherError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: variants `FailledToGetFrames`, `StreamEnd`, `ViolatedSpec`, and `MalformedMessage` are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:173:5
+ i  #16 3.599     |
+ i  #16 3.599 171 | pub enum FrontendError {
+ i  #16 3.599     |          ------------- variants in this enum
+ i  #16 3.599 172 |     /// Failed to get more frames from the connection
+ i  #16 3.599 173 |     FailledToGetFrames,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^
+ i  #16 3.599 174 |     /// Attemped to read bytes form stream to desiarialize but stream ran out
+ i  #16 3.599 175 |     StreamEnd,
+ i  #16 3.599     |     ^^^^^^^^^
+ i  #16 3.599 176 |     /// The stream was not formated according to the expected specification
+ i  #16 3.599 177 |     ViolatedSpec,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599 178 |     /// The structure descibed does not cofrom with the expected message
+ i  #16 3.599 179 |     MalformedMessage,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `FrontendError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: variant `LocalLoadingReceive` is never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:186:5
+ i  #16 3.599     |
+ i  #16 3.599 184 | pub enum FunctionRegistryError {
+ i  #16 3.599     |          --------------------- variant in this enum
+ i  #16 3.599 185 |     /// Failed to receive local loading result that was triggered by another function
+ i  #16 3.599 186 |     LocalLoadingReceive,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `FunctionRegistryError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: variants `NoneAvailable`, `Default`, `DroppedDebt`, and `TakenPromise` are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:192:5
+ i  #16 3.599     |
+ i  #16 3.599 190 | pub enum PromiseError {
+ i  #16 3.599     |          ------------ variants in this enum
+ i  #16 3.599 191 |     /// No promises left in promise buffer
+ i  #16 3.599 192 |     NoneAvailable,
+ i  #16 3.599     |     ^^^^^^^^^^^^^
+ i  #16 3.599 193 |     /// Default result, was never replaced
+ i  #16 3.599 194 |     Default,
+ i  #16 3.599     |     ^^^^^^^
+ i  #16 3.599 195 |     /// Dept was dropped without fulfilling it
+ i  #16 3.599 196 |     DroppedDebt,
+ i  #16 3.599     |     ^^^^^^^^^^^
+ i  #16 3.599 197 |     /// Promise result after taking it already
+ i  #16 3.599 198 |     TakenPromise,
+ i  #16 3.599     |     ^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `PromiseError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: variants `EmptyNonOptional` and `FunctionError` are never constructed
+ i  #16 3.599    --> src/dandelion_commons/mod.rs:204:5
+ i  #16 3.599     |
+ i  #16 3.599 202 | pub enum UserError {
+ i  #16 3.599     |          --------- variants in this enum
+ i  #16 3.599 203 |     /// Set not declared optional is empty
+ i  #16 3.599 204 |     EmptyNonOptional,
+ i  #16 3.599     |     ^^^^^^^^^^^^^^^^
+ i  #16 3.599 205 |     /// Function indicated it failed
+ i  #16 3.599 206 |     FunctionError(i32),
+ i  #16 3.599     |     ^^^^^^^^^^^^^
+ i  #16 3.599     |
+ i  #16 3.599     = note: `UserError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+ i  #16 3.599 
+ i  #16 3.599 warning: struct `RangePool` is never constructed
+ i  #16 3.599  --> src/dandelion_commons/range_pool.rs:8:12
+ i  #16 3.599   |
+ i  #16 3.599 8 | pub struct RangePool<Element> {
+ i  #16 3.599   |            ^^^^^^^^^
+ i  #16 3.599 
+ i  #16 3.599 warning: associated items `new`, `get`, and `insert` are never used
+ i  #16 3.599   --> src/dandelion_commons/range_pool.rs:21:12
+ i  #16 3.599    |
+ i  #16 3.599 17 | / impl<Element> RangePool<Element>
+ i  #16 3.599 18 | | where
+ i  #16 3.599 19 | |     Element: Copy + Ord + Sub<Output = Element>,
+ i  #16 3.599    | |________________________________________________- associated items in this implementation
+ i  #16 3.599 20 |   {
+ i  #16 3.599 21 |       pub fn new(initial_range: std::ops::Range<Element>) -> Self {
+ i  #16 3.599    |              ^^^
+ i  #16 3.599 ...
+ i  #16 3.599 30 |       pub fn get(&mut self, requested_size: Element, min_value: Element) -> Option<Element> {
+ i  #16 3.599    |              ^^^
+ i  #16 3.599 ...
+ i  #16 3.599 58 |       pub fn insert(&mut self, start: Element, mut end: Element) {
+ i  #16 3.599    |              ^^^^^^
+ i  #16 3.599 
+ i  #16 3.599 warning: constant `LAST_RECORD_POINT` is never used
+ i  #16 3.599  --> src/dandelion_commons/records.rs:8:7
+ i  #16 3.599   |
+ i  #16 3.599 8 | const LAST_RECORD_POINT: usize = 17;
+ i  #16 3.599   |       ^^^^^^^^^^^^^^^^^
+ i  #16 3.599 
+ i  #16 3.599 warning: enum `RecordPoint` is never used
+ i  #16 3.599   --> src/dandelion_commons/records.rs:12:10
+ i  #16 3.599    |
+ i  #16 3.599 12 | pub enum RecordPoint {
+ i  #16 3.599    |          ^^^^^^^^^^^
+ i  #16 3.599 
+ i  #16 3.599 warning: struct `Recorder` is never constructed
+ i  #16 3.599    --> src/dandelion_commons/records.rs:169:12
+ i  #16 3.599     |
+ i  #16 3.599 169 | pub struct Recorder {
+ i  #16 3.599     |            ^^^^^^^^
+ i  #16 3.599 
+ i  #16 3.599 warning: associated items `new`, `new_from_parent`, `record`, `add_children`, and `get_sub_recorder` are never used
+ i  #16 3.599    --> src/dandelion_commons/records.rs:175:12
+ i  #16 3.599     |
+ i  #16 3.599 174 | impl Recorder {
+ i  #16 3.599     | ------------- associated items in this implementation
+ i  #16 3.599 175 |     pub fn new(_function_id: FunctionId, _start: Instant) -> Self {
+ i  #16 3.599     |            ^^^
+ i  #16 3.599 ...
+ i  #16 3.599 182 |     pub fn new_from_parent(_function_id: FunctionId, _parent: &Self) -> Self {
+ i  #16 3.599     |            ^^^^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 189 |     pub fn record(&mut self, _current_point: RecordPoint) {
+ i  #16 3.599     |            ^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 194 |     pub fn add_children(&mut self, _new_children: Vec<Recorder>) {
+ i  #16 3.599     |            ^^^^^^^^^^^^
+ i  #16 3.599 ...
+ i  #16 3.599 201 |     pub fn get_sub_recorder(&self) -> Self {
+ i  #16 3.599     |            ^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: struct `Archive` is never constructed
+ i  #16 3.600    --> src/dandelion_commons/records.rs:225:12
+ i  #16 3.600     |
+ i  #16 3.600 225 | pub struct Archive {
+ i  #16 3.600     |            ^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: struct `ArchiveInit` is never constructed
+ i  #16 3.600    --> src/dandelion_commons/records.rs:230:12
+ i  #16 3.600     |
+ i  #16 3.600 230 | pub struct ArchiveInit {
+ i  #16 3.600     |            ^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: associated items `init`, `insert_recorder`, `get_summary`, and `reset` are never used
+ i  #16 3.600    --> src/dandelion_commons/records.rs:236:12
+ i  #16 3.600     |
+ i  #16 3.600 235 | impl Archive {
+ i  #16 3.600     | ------------ associated items in this implementation
+ i  #16 3.600 236 |     pub fn init() -> Self {
+ i  #16 3.600     |            ^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 243 |     pub fn insert_recorder(&self, _recorder: Recorder) {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 249 |     pub fn get_summary(&self) -> String {
+ i  #16 3.600     |            ^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 258 |     pub fn reset(&self) {
+ i  #16 3.600     |            ^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: struct `Position` is never constructed
+ i  #16 3.600  --> src/elfloader/mod.rs:6:12
+ i  #16 3.600   |
+ i  #16 3.600 6 | pub struct Position {
+ i  #16 3.600   |            ^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `DEFAULT_ALIGNMENT` is never used
+ i  #16 3.600  --> src/elfloader/elf_parser.rs:5:11
+ i  #16 3.600   |
+ i  #16 3.600 5 | pub const DEFAULT_ALIGNMENT: usize = 4096;
+ i  #16 3.600   |           ^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: field `e_shstrndx` is never read
+ i  #16 3.600   --> src/elfloader/elf_parser.rs:47:5
+ i  #16 3.600    |
+ i  #16 3.600 34 | struct ElfEhdr {
+ i  #16 3.600    |        ------- field in this struct
+ i  #16 3.600 ...
+ i  #16 3.600 47 |     e_shstrndx: u16,
+ i  #16 3.600    |     ^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: fields `p_type`, `p_flags`, `p_offset`, `p_vaddr`, `p_filesz`, and `p_memsz` are never read
+ i  #16 3.600   --> src/elfloader/elf_parser.rs:70:5
+ i  #16 3.600    |
+ i  #16 3.600 69 | struct ElfPhdr {
+ i  #16 3.600    |        ------- fields in this struct
+ i  #16 3.600 70 |     p_type: u32,
+ i  #16 3.600    |     ^^^^^^
+ i  #16 3.600 71 |     p_flags: u32,
+ i  #16 3.600    |     ^^^^^^^
+ i  #16 3.600 72 |     p_offset: u64,
+ i  #16 3.600    |     ^^^^^^^^
+ i  #16 3.600 73 |     p_vaddr: u64,
+ i  #16 3.600    |     ^^^^^^^
+ i  #16 3.600 74 |     _p_paddr: u64,
+ i  #16 3.600 75 |     p_filesz: u64,
+ i  #16 3.600    |     ^^^^^^^^
+ i  #16 3.600 76 |     p_memsz: u64,
+ i  #16 3.600    |     ^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: field `sh_name` is never read
+ i  #16 3.600    --> src/elfloader/elf_parser.rs:121:5
+ i  #16 3.600     |
+ i  #16 3.600 120 | struct ElfShdr {
+ i  #16 3.600     |        ------- field in this struct
+ i  #16 3.600 121 |     sh_name: u32,
+ i  #16 3.600     |     ^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: fields `st_name`, `st_value`, and `st_size` are never read
+ i  #16 3.600    --> src/elfloader/elf_parser.rs:163:5
+ i  #16 3.600     |
+ i  #16 3.600 162 | struct ElfSym {
+ i  #16 3.600     |        ------ fields in this struct
+ i  #16 3.600 163 |     st_name: u32,
+ i  #16 3.600     |     ^^^^^^^
+ i  #16 3.600 164 |     st_value: u64,
+ i  #16 3.600     |     ^^^^^^^^
+ i  #16 3.600 165 |     st_size: u64,
+ i  #16 3.600     |     ^^^^^^^
+ i  #16 3.600     |
+ i  #16 3.600     = note: `ElfSym` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+ i  #16 3.600 
+ i  #16 3.600 warning: fields `program_header_table`, `section_header_table`, and `symbol_table` are never read
+ i  #16 3.600    --> src/elfloader/elf_parser.rs:228:5
+ i  #16 3.600     |
+ i  #16 3.600 226 | pub struct ParsedElf {
+ i  #16 3.600     |            --------- fields in this struct
+ i  #16 3.600 227 |     ehdr: ElfEhdr,
+ i  #16 3.600 228 |     program_header_table: Vec<ElfPhdr>,
+ i  #16 3.600     |     ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 229 |     section_header_table: Vec<ElfShdr>,
+ i  #16 3.600     |     ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 230 |     symbol_table: Vec<ElfSym>,
+ i  #16 3.600     |     ^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `SHT_STRTAB` is never used
+ i  #16 3.600    --> src/elfloader/elf_parser.rs:234:7
+ i  #16 3.600     |
+ i  #16 3.600 234 | const SHT_STRTAB: u32 = 0x3;
+ i  #16 3.600     |       ^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: methods `get_layout_pair`, `get_memory_protection_layout`, and `get_symbol_by_name` are never used
+ i  #16 3.600    --> src/elfloader/elf_parser.rs:286:12
+ i  #16 3.600     |
+ i  #16 3.600 236 | impl ParsedElf {
+ i  #16 3.600     | -------------- methods in this implementation
+ i  #16 3.600 ...
+ i  #16 3.600 286 |     pub fn get_layout_pair(&self) -> (Vec<Position>, Vec<Position>) {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 307 |     pub fn get_memory_protection_layout(&self) -> Vec<(u32, Position)> {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 332 |     pub fn get_symbol_by_name(&self, file: &[u8], name: &str) -> DandelionResult<(usize, usize)> {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `get_k2u_data_offset` is never used
+ i  #16 3.600    --> src/trampolines.rs:913:15
+ i  #16 3.600     |
+ i  #16 3.600 913 | pub unsafe fn get_k2u_data_offset() -> usize {
+ i  #16 3.600     |               ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `get_u2k_data_offset` is never used
+ i  #16 3.600    --> src/trampolines.rs:920:15
+ i  #16 3.600     |
+ i  #16 3.600 920 | pub unsafe fn get_u2k_data_offset() -> usize {
+ i  #16 3.600     |               ^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `get_k2u_entry` is never used
+ i  #16 3.600    --> src/trampolines.rs:998:15
+ i  #16 3.600     |
+ i  #16 3.600 998 | pub unsafe fn get_k2u_entry() -> u64 {
+ i  #16 3.600     |               ^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `get_u2k_entry` is never used
+ i  #16 3.600     --> src/trampolines.rs:1003:15
+ i  #16 3.600      |
+ i  #16 3.600 1003 | pub unsafe fn get_u2k_entry() -> u64 {
+ i  #16 3.600      |               ^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: static `k2u_data_start` is never used
+ i  #16 3.600    --> src/trampolines.rs:869:12
+ i  #16 3.600     |
+ i  #16 3.600 869 |     static k2u_data_start: u8;
+ i  #16 3.600     |            ^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: static `k2u_data_end` is never used
+ i  #16 3.600    --> src/trampolines.rs:870:12
+ i  #16 3.600     |
+ i  #16 3.600 870 |     static k2u_data_end: u8;
+ i  #16 3.600     |            ^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: static `u2k_data_start` is never used
+ i  #16 3.600    --> src/trampolines.rs:874:12
+ i  #16 3.600     |
+ i  #16 3.600 874 |     static u2k_data_start: u8;
+ i  #16 3.600     |            ^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: static `u2k_data_end` is never used
+ i  #16 3.600    --> src/trampolines.rs:875:12
+ i  #16 3.600     |
+ i  #16 3.600 875 |     static u2k_data_end: u8;
+ i  #16 3.600     |            ^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `trampoline_kernel_to_user` is never used
+ i  #16 3.600    --> src/trampolines.rs:892:8
+ i  #16 3.600     |
+ i  #16 3.600 892 |     fn trampoline_kernel_to_user() -> !;
+ i  #16 3.600     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `trampoline_user_to_kernel` is never used
+ i  #16 3.600    --> src/trampolines.rs:893:8
+ i  #16 3.600     |
+ i  #16 3.600 893 |     fn trampoline_user_to_kernel() -> !;
+ i  #16 3.600     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `get_user_code_size` is never used
+ i  #16 3.600   --> src/user_code.rs:70:15
+ i  #16 3.600    |
+ i  #16 3.600 70 | pub unsafe fn get_user_code_size() -> usize {
+ i  #16 3.600    |               ^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `PDE64_ACCESSED` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:24:7
+ i  #16 3.600    |
+ i  #16 3.600 24 | const PDE64_ACCESSED: u64 = 1 << 5;
+ i  #16 3.600    |       ^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `PDE64_DIRTY` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:25:7
+ i  #16 3.600    |
+ i  #16 3.600 25 | const PDE64_DIRTY: u64 = 1 << 6;
+ i  #16 3.600    |       ^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `PAGE_MASK` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:34:7
+ i  #16 3.600    |
+ i  #16 3.600 34 | const PAGE_MASK: u64 = (PAGE_SIZE - 1) as u64;
+ i  #16 3.600    |       ^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `LARGE_PAGE_SHIFT` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:36:7
+ i  #16 3.600    |
+ i  #16 3.600 36 | const LARGE_PAGE_SHIFT: usize = 21;
+ i  #16 3.600    |       ^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `LARGE_PAGE` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:37:7
+ i  #16 3.600    |
+ i  #16 3.600 37 | const LARGE_PAGE: usize = 1 << LARGE_PAGE_SHIFT; // 2MB
+ i  #16 3.600    |       ^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `PML4_SHIFT` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:42:7
+ i  #16 3.600    |
+ i  #16 3.600 42 | const PML4_SHIFT: usize = 39;
+ i  #16 3.600    |       ^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: method `load_into_cpu` is never used
+ i  #16 3.600   --> src/user_pagetable.rs:89:19
+ i  #16 3.600    |
+ i  #16 3.600 67 | impl InterruptConfig {
+ i  #16 3.600    | -------------------- method in this implementation
+ i  #16 3.600 ...
+ i  #16 3.600 89 |     pub unsafe fn load_into_cpu(&self) {
+ i  #16 3.600    |                   ^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: associated items `get_aligned_mem`, `get_gdt_address`, `get_tss_address`, `get_idt_address`, and `switch_to_kernel_cr3` are never used
+ i  #16 3.600     --> src/user_pagetable.rs:1078:8
+ i  #16 3.600      |
+ i  #16 3.600  433 | impl UserSpaceManager {
+ i  #16 3.600      | --------------------- associated items in this implementation
+ i  #16 3.600 ...
+ i  #16 3.600 1078 |     fn get_aligned_mem(&self) -> &[u8] {
+ i  #16 3.600      |        ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 1100 |     pub fn get_gdt_address(&self) -> usize {
+ i  #16 3.600      |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 1105 |     pub fn get_tss_address(&self) -> usize {
+ i  #16 3.600      |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 1110 |     pub fn get_idt_address(&self) -> usize {
+ i  #16 3.600      |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 1757 |     pub unsafe fn switch_to_kernel_cr3(kernel_cr3: u64) {
+ i  #16 3.600      |                   ^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `dump_memory` is never used
+ i  #16 3.600   --> src/debug_utils.rs:42:15
+ i  #16 3.600    |
+ i  #16 3.600 42 | pub unsafe fn dump_memory(start: *const u8, len: usize) {
+ i  #16 3.600    |               ^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `inspect_address` is never used
+ i  #16 3.600   --> src/debug_utils.rs:59:15
+ i  #16 3.600    |
+ i  #16 3.600 59 | pub unsafe fn inspect_address(cr3: u64, va: u64, name: &str) {
+ i  #16 3.600    |               ^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `GDT_SEL_KERN_CODE` is never used
+ i  #16 3.600   --> src/boot/boot_trampoline_bindings.rs:13:11
+ i  #16 3.600    |
+ i  #16 3.600 13 | pub const GDT_SEL_KERN_CODE: u16 = 0x08; // Kernel code segment (ring 0)
+ i  #16 3.600    |           ^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `GDT_SEL_KERN_DATA` is never used
+ i  #16 3.600   --> src/boot/boot_trampoline_bindings.rs:14:11
+ i  #16 3.600    |
+ i  #16 3.600 14 | pub const GDT_SEL_KERN_DATA: u16 = 0x10; // Kernel data segment (ring 0)
+ i  #16 3.600    |           ^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `GDT_SEL_USER_CODE` is never used
+ i  #16 3.600   --> src/boot/boot_trampoline_bindings.rs:15:11
+ i  #16 3.600    |
+ i  #16 3.600 15 | pub const GDT_SEL_USER_CODE: u16 = 0x1B; // User code segment (ring 3)
+ i  #16 3.600    |           ^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: constant `GDT_SEL_USER_DATA` is never used
+ i  #16 3.600   --> src/boot/boot_trampoline_bindings.rs:16:11
+ i  #16 3.600    |
+ i  #16 3.600 16 | pub const GDT_SEL_USER_DATA: u16 = 0x23; // User data segment (ring 3)
+ i  #16 3.600    |           ^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: associated function `new` is never used
+ i  #16 3.600   --> src/boot/boot_trampoline_bindings.rs:33:18
+ i  #16 3.600    |
+ i  #16 3.600 32 | impl CpuData {
+ i  #16 3.600    | ------------ associated function in this implementation
+ i  #16 3.600 33 |     pub const fn new() -> Self {
+ i  #16 3.600    |                  ^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: methods `read_kernel_cr3`, `read_gdt_config`, `read_idt_config`, and `read_tss_config` are never used
+ i  #16 3.600    --> src/ap/mod.rs:118:12
+ i  #16 3.600     |
+ i  #16 3.600  37 | impl ApTaskInfo {
+ i  #16 3.600     | --------------- methods in this implementation
+ i  #16 3.600 ...
+ i  #16 3.600 118 |     pub fn read_kernel_cr3(&self) -> u64 {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 146 |     pub fn read_gdt_config(&self) -> (u64, u16) {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 155 |     pub fn read_idt_config(&self) -> (u64, u16) {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 ...
+ i  #16 3.600 164 |     pub fn read_tss_config(&self) -> (u64, u16) {
+ i  #16 3.600     |            ^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.600 warning: function `load_user_page_tables` is never used
+ i  #16 3.600   --> src/ap/ap.rs:13:11
+ i  #16 3.600    |
+ i  #16 3.600 13 | unsafe fn load_user_page_tables(cr3: u64) {
+ i  #16 3.600    |           ^^^^^^^^^^^^^^^^^^^^^
+ i  #16 3.600 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:904:9
+ i  #16 3.603     |
+ i  #16 3.603 904 |         AP_TASK_INFO.write_user_cr3(user_space.get_cr3());
+ i  #16 3.603     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603     = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:911:9
+ i  #16 3.603     |
+ i  #16 3.603 911 |         AP_TASK_INFO.write_kernel_cr3(kernel_cr3);
+ i  #16 3.603     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:918:9
+ i  #16 3.603     |
+ i  #16 3.603 918 | /         AP_TASK_INFO.write_interrupt_config(
+ i  #16 3.603 919 | |             interrupt_config.gdt_base,
+ i  #16 3.603 920 | |             interrupt_config.gdt_limit,
+ i  #16 3.603 921 | |             interrupt_config.idt_base,
+ i  #16 3.603 ...   |
+ i  #16 3.603 924 | |             interrupt_config.tss_selector,
+ i  #16 3.603 925 | |         );
+ i  #16 3.603     | |_________^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:942:9
+ i  #16 3.603     |
+ i  #16 3.603 942 |         AP_TASK_INFO.write_k2u_trampoline(high_va_page1);
+ i  #16 3.603     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:944:9
+ i  #16 3.603     |
+ i  #16 3.603 944 |         AP_TASK_INFO.write_u2k_trampoline(high_va_page2);
+ i  #16 3.603     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603    --> src/main.rs:950:9
+ i  #16 3.603     |
+ i  #16 3.603 950 |         AP_TASK_INFO.write_entry_point(elf_entry_point as u64);
+ i  #16 3.603     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603     |
+ i  #16 3.603     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.603 warning: creating a shared reference to mutable static
+ i  #16 3.603     --> src/main.rs:1154:26
+ i  #16 3.603      |
+ i  #16 3.603 1154 |             let status = AP_TASK_INFO.read_status();
+ i  #16 3.603      |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.603      |
+ i  #16 3.603      = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.603      = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.603 
+ i  #16 3.604 warning: creating a shared reference to mutable static
+ i  #16 3.604    --> src/trampolines.rs:933:21
+ i  #16 3.604     |
+ i  #16 3.604 933 |         let field = &super::kernel_rsp_save as *const u64 as usize;
+ i  #16 3.604     |                     ^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.604     |
+ i  #16 3.604     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.604     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.604 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.604     |
+ i  #16 3.604 933 |         let field = &raw const super::kernel_rsp_save as *const u64 as usize;
+ i  #16 3.604     |                      +++++++++
+ i  #16 3.604 
+ i  #16 3.604 warning: creating a shared reference to mutable static
+ i  #16 3.604    --> src/trampolines.rs:939:21
+ i  #16 3.604     |
+ i  #16 3.604 939 |         let field = &super::u2k_rsp_save_addr as *const u64 as usize;
+ i  #16 3.604     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.604     |
+ i  #16 3.604     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.604     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.604 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.604     |
+ i  #16 3.604 939 |         let field = &raw const super::u2k_rsp_save_addr as *const u64 as usize;
+ i  #16 3.604     |                      +++++++++
+ i  #16 3.604 
+ i  #16 3.604 warning: creating a shared reference to mutable static
+ i  #16 3.604    --> src/trampolines.rs:945:21
+ i  #16 3.604     |
+ i  #16 3.604 945 |         let field = &super::user_cr3_value as *const u64 as usize;
+ i  #16 3.604     |                     ^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.604     |
+ i  #16 3.604     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.604     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.604 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.604     |
+ i  #16 3.604 945 |         let field = &raw const super::user_cr3_value as *const u64 as usize;
+ i  #16 3.604     |                      +++++++++
+ i  #16 3.604 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:951:21
+ i  #16 3.605     |
+ i  #16 3.605 951 |         let field = &super::gdt_desc as *const [u8; 16] as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 951 |         let field = &raw const super::gdt_desc as *const [u8; 16] as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:957:21
+ i  #16 3.605     |
+ i  #16 3.605 957 |         let field = &super::idt_desc as *const [u8; 16] as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 957 |         let field = &raw const super::idt_desc as *const [u8; 16] as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:963:21
+ i  #16 3.605     |
+ i  #16 3.605 963 |         let field = &super::tss_selector as *const u64 as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 963 |         let field = &raw const super::tss_selector as *const u64 as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:969:21
+ i  #16 3.605     |
+ i  #16 3.605 969 |         let field = &super::user_stack_top as *const u64 as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 969 |         let field = &raw const super::user_stack_top as *const u64 as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:975:21
+ i  #16 3.605     |
+ i  #16 3.605 975 |         let field = &super::user_entry_point as *const u64 as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 975 |         let field = &raw const super::user_entry_point as *const u64 as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:986:21
+ i  #16 3.605     |
+ i  #16 3.605 986 |         let field = &super::kernel_cr3_value as *const u64 as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 986 |         let field = &raw const super::kernel_cr3_value as *const u64 as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.605 warning: creating a shared reference to mutable static
+ i  #16 3.605    --> src/trampolines.rs:992:21
+ i  #16 3.605     |
+ i  #16 3.605 992 |         let field = &super::kernel_rsp_restore as *const u64 as usize;
+ i  #16 3.605     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.605     |
+ i  #16 3.605     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.605     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.605 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.605     |
+ i  #16 3.605 992 |         let field = &raw const super::kernel_rsp_restore as *const u64 as usize;
+ i  #16 3.605     |                      +++++++++
+ i  #16 3.605 
+ i  #16 3.607 warning: creating a shared reference to mutable static
+ i  #16 3.607    --> src/ap/ap.rs:480:15
+ i  #16 3.607     |
+ i  #16 3.607 480 |         base: AP_IDT.as_ptr() as u64,
+ i  #16 3.607     |               ^^^^^^^^^^^^^^^ shared reference to mutable static
+ i  #16 3.607     |
+ i  #16 3.607     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.607     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.607 
+ i  #16 3.607 warning: creating a shared reference to mutable static
+ i  #16 3.607    --> src/ap/ap.rs:503:20
+ i  #16 3.607     |
+ i  #16 3.607 503 |     let tss_base = &AP_TSS as *const Tss as u64;
+ i  #16 3.607     |                    ^^^^^^^ shared reference to mutable static
+ i  #16 3.607     |
+ i  #16 3.607     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+ i  #16 3.607     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+ i  #16 3.607 help: use `&raw const` instead to create a raw pointer
+ i  #16 3.607     |
+ i  #16 3.607 503 |     let tss_base = &raw const AP_TSS as *const Tss as u64;
+ i  #16 3.607     |                     +++++++++
+ i  #16 3.607 
+ i  #16 7.171 warning: `smp-poc` (bin "smp-poc") generated 110 warnings (run `cargo fix --bin "smp-poc"` to apply 10 suggestions)
+ i  #16 7.171     Finished `release` profile [optimized] target(s) in 7.00s
+ i  #16 DONE 7.2s
  i  
- i  #17 [build 11/12] RUN make asm
+ i  #17 [stage-1 3/5] COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
  i  #17 CACHED
  i  
- i  #18 [build  8/12] COPY ./tls_linker.ld ./tls_linker.ld
+ i  #18 [stage-1 4/5] COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
  i  #18 CACHED
  i  
- i  #19 [build 10/12] RUN rustup target add x86_64-unknown-linux-musl
+ i  #19 [stage-1 1/5] COPY --from=build /target/x86_64-unknown-linux-musl/release/smp-poc /smp-poc
  i  #19 CACHED
  i  
  i  #20 [stage-1 2/5] COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
@@ -76,9 +1387,9 @@ KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
  i  #21 CACHED
  i  
  i  #22 exporting to oci image format
- i  #22 exporting layers 0.1s done
- i  #22 exporting manifest sha256:bdb0db10d5a7912d5e199af3ae89d55b2e99dc2b91d75dd85eb09cb5af2c9918 0.0s done
- i  #22 exporting config sha256:95c6e42394538e6ef37370fafe00fab71f2b28fc2b71d65cc7ee240ba9a90983 0.0s done
+ i  #22 exporting layers 0.0s done
+ i  #22 exporting manifest sha256:0085450a727a3e6127518709381fe360a8cceabd1f958b021a59e21c88a533cb done
+ i  #22 exporting config sha256:8e057658fdd4c8c2391c7316325cba135a5449110bc3ed72cb31395467a26302 done
  i  #22 sending tarball 0.0s done
  i  #22 DONE 0.1s
  i  
@@ -88,16 +1399,16 @@ KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
  i  
  i  #24 exporting cache to client directory
  i  #24 preparing build cache for export
- i  #24 writing layer sha256:2c09db0c9daec368869a19c751ee18b0614a32fc827734edf200d27ffc63edec
- i  #24 preparing build cache for export 0.9s done
- i  #24 writing layer sha256:2c09db0c9daec368869a19c751ee18b0614a32fc827734edf200d27ffc63edec done
- i  #24 writing layer sha256:a89428e56cc0740f778efa245aae56fef7c8bfc733c31c073e29a33556b058ca done
- i  #24 writing layer sha256:aacb9e7a9dfdf806ff68146fafdb9807a8710e84eeea722a22b8029a31d00072 done
- i  #24 writing layer sha256:b9e1e75651404f7a66fbdb9ecb78e656f28eab98bc5a6713fba42f203c46854d done
+ i  #24 writing layer sha256:0bdbd625cca4685da52fb9efba55351265d2188c2d6f96a36fcc092d9080d3ae
+ i  #24 preparing build cache for export 1.4s done
+ i  #24 writing layer sha256:0bdbd625cca4685da52fb9efba55351265d2188c2d6f96a36fcc092d9080d3ae done
+ i  #24 writing layer sha256:5a70206d11c264ab36f0c53feccddbf3ab4ab214f53a468ab1fa086aba5572b6 done
+ i  #24 writing layer sha256:b806fefb39a840099c012dd7dd25660cfc3e93c58c27503cba09f351db48235e done
  i  #24 writing layer sha256:e19dbe96b150fa8675d7fe836d15b4a047e5e55735d2db7e0f722a2386cf8024 done
- i  #24 writing config sha256:202cf5fb65a8b0fa136d78b410530ca99540c619e3cc5ebafc99bb754d3ba7b7 0.0s done
- i  #24 writing cache image manifest sha256:2ec0560dee36d10de9893901de9a9bbec4221bf070050b0a249eeb00972ce6da 0.0s done
- i  #24 DONE 0.9s
+ i  #24 writing layer sha256:f12fc56e88b399566a3a67c9a9b8424e2049caf8e329dd930e088031f049e64d done
+ i  #24 writing config sha256:edd70a69b2b542b3d8961644ee70414f4075922fb5b8ffd0336672f681592d53 0.0s done
+ i  #24 writing cache image manifest sha256:2f976d78cc5949899761d2219872ba5874c03d76e26aa8d029d7b58564c8e4f0 0.0s done
+ i  #24 DONE 1.4s
  i  build completed successfully initramfs=Dockerfile
 ✓ Initramfs created: .unikraft/build/initramfs-x86_64.cpio
 Starting QEMU with 4 CPUs and Unikraft kernel...
@@ -114,8 +1425,8 @@ Rust Multicore Boot Starting...
 CR4 value at startup: 0x0000000000050620
   SMEP: disabled
   SMAP: disabled
-BSP running from: main() at 0x10001d7c80
-AP entry point: ap_entry() at 0x10001e06c0
+BSP running from: main() at 0x10001db37e
+AP entry point: ap_entry() at 0x10001e4858
 
 === TEST: Trampoline Allocation and High Address Mapping ===
 Step 1: Allocated 12288 bytes (3 pages)
@@ -125,12 +1436,12 @@ Step 1: Allocated 12288 bytes (3 pages)
     Page 1 VA: 0x000000100012f000
     Page 2 VA: 0x0000001000130000
   Physical addresses (from page table walk):
-    Page 1 PA: 0x0000000000a2c000
-    Page 2 PA: 0x000000000090f000
+    Page 1 PA: 0x0000000000a3e000
+    Page 2 PA: 0x0000000000a3d000
 
 Step 2: Mapping at high addresses (~2TB, below VMA region)
-  High VA page 1: 0x00001fffffffe000 -> PA: 0x0000000000a2c000
-  High VA page 2: 0x00001ffffffff000 -> PA: 0x000000000090f000
+  High VA page 1: 0x00001fffffffe000 -> PA: 0x0000000000a3e000
+  High VA page 2: 0x00001ffffffff000 -> PA: 0x0000000000a3d000
   ✓ Pages mapped successfully
   ✓ TLB flushed
 === TEST COMPLETE ===
@@ -143,11 +1454,11 @@ x2APIC enabled on BSP
 ✓ ELF entry point: 0x11630
 
 === Testing User Space Manager (Dandelion Pattern) ===
-  Raw allocation at 0x000000100024c090, alignment offset: 0xf70
-  guest_mem at KVA 0x000000100024d000 (page-aligned ✓)
+  Raw allocation at 0x0000001000252090, alignment offset: 0xf70
+  guest_mem at KVA 0x0000001000253000 (page-aligned ✓)
   Forcing kernel to map 16384 pages...
   All pages now mapped in kernel page tables ✓
-  guest_mem at PA  0x0000000000a37000 (page-aligned ✓)
+  guest_mem at PA  0x0000000000981000 (page-aligned ✓)
 
 === BUFFER LAYOUT (64MB total) ===
   Buffer size: 67108864 bytes (0x4000000)
@@ -170,13 +1481,13 @@ x2APIC enabled on BSP
 
   P4 setup:
     p4_offset in guest_mem: 0x3fff000
-    p4_kva: 0x000000100424c000
-    p4_pa:  0x00000000031d5000 (validated page-aligned ✓)
+    p4_kva: 0x0000001004252000
+    p4_pa:  0x00000000031df000 (validated page-aligned ✓)
 
 === User Space Manager Summary ===
   Virtual address space:  0x0 - 0x4000000 (64 MB)
   Buffer size:            67112960 bytes (64 MB)
-  PML4 (CR3):             0x00000000031d5000
+  PML4 (CR3):             0x00000000031df000
 
   Memory layout:
     User space:           0x0 - 0x3df4000 (61.95 MB)
@@ -188,165 +1499,171 @@ x2APIC enabled on BSP
       Int stack:          0x3df6000 (top: 0x3dfa000)
     Page tables:          0x3dfd000 - 0x4000000
 
-  User code size: 14 bytes
-  User code:
-    1. Print 'U' to UART (shows we're in user space)
+  User code (from assembly): 24 bytes
+  Entry offset: 0x0
+  User code buffer raw: 0x10001430a0
+  User code buffer aligned: 0x1000144000
+  User code will:
+    1. Set RBX to marker value
     2. Trigger INT 32 (calls U->K trampoline)
     3. Should never reach loop
 
 === map_user_range ===
   Mapping: user VA 0x400000 - 0x410000
-  From:    kernel VA 0x10001430a0
+  From:    kernel VA 0x1000144000
   Size:    0x10000 (64 KB)
   Writable: false
   Kernel-accessible (no U bit): false
   table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
+  table_base KVA: 0x1004050000
   ✓ set_range completed
 
   Verifying mappings...
-  ✓ First page VA 0x400000 -> PA 0x31d6000
-  ✓ Last page VA 0x40f000 -> PA 0x31e6000 (W=0 U=1)
+  ✓ First page VA 0x400000 -> PA 0x31e2000
+  ✓ Last page VA 0x40f000 -> PA 0x31f1000 (W=0 U=1)
   ✓ All pages verified!
 ✓ Mapped user code region:
   User virtual:   0x400000 - 0x410000
-  Kernel virtual: 0x10001430a0 - 0x10001530a0
+  Kernel virtual: 0x1000144000 - 0x1000154000
 
 
 === map_user_range ===
   Mapping: user VA 0x3de4000 - 0x3df4000
-  From:    kernel VA 0x10001540b0
+  From:    kernel VA 0x10001550b0
   Size:    0x10000 (64 KB)
   Writable: true
   Kernel-accessible (no U bit): false
   table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
+  table_base KVA: 0x1004050000
   ✓ set_range completed
 
   Verifying mappings...
-  ✓ First page VA 0x3de4000 -> PA 0x31e7000
-  ✓ Last page VA 0x3df3000 -> PA 0x31f7000 (W=1 U=1)
+  ✓ First page VA 0x3de4000 -> PA 0x31f2000
+  ✓ Last page VA 0x3df3000 -> PA 0x3202000 (W=1 U=1)
   Checking stack-like mapping: will verify first push address 0x3df3ff8
-  ✓ First push address 0x3df3ff8 -> PA 0x31f7000
+  ✓ First push address 0x3df3ff8 -> PA 0x3202000
     PTE flags: P=1 W=1 U=1
   ✓ All pages verified!
-✓ User space ready! CR3 = 0x00000000031d5000
+✓ User space ready! CR3 = 0x00000000031df000
 
 === Mapping Trampolines in User Page Tables ===
 
 === Mapping Trampolines in User Page Tables ===
   VA base:  0x00001fffffffe000
-  PA page1: 0x0000000000a2c000
-  PA page2: 0x000000000090f000
+  PA page1: 0x0000000000a3e000
+  PA page2: 0x0000000000a3d000
   Indices: PML4[63] -> PDPT[511] -> PD[511] -> PT[510]
   Trampoline page table physical addresses (pre-validated):
-    P3 PA: 0x0000000002fd0000
-    P2 PA: 0x0000000002fd1000
-    P1 PA: 0x0000000002fd2000
-  Set P4[63] = 0x0000000002fd0003
-  DEBUG: Read back from guest_mem[0x3fff1f8] = 0x0000000002fd0003
-  DEBUG: guest_mem[0x3fff1f8] KVA: 0x000000100424c1f8
-  DEBUG: Maps to PA: 0x00000000031d5000 + 0x1f8 = 0x00000000031d51f8
-  DEBUG: CR3 expects P4[63] at: 0x00000000031d5000 + 0x1f8 = 0x00000000031d51f8
-  Set P3[511] = 0x0000000002fd1007
-  DEBUG: Read back from guest_mem[0x3dfaff8] = 0x0000000002fd1007
-  Set P2[511] = 0x0000000002fd2007
-  DEBUG: Read back from guest_mem[0x3dfbff8] = 0x0000000002fd2007
-  Set P1[510] = 0x0000000000a2c003 (trampoline page 1)
-  Set P1[511] = 0x000000000090f003 (trampoline page 2)
-  DEBUG: Read back P1[510] from guest_mem[0x3dfcff0] = 0x0000000000a2c003
-  DEBUG: Read back P1[511] from guest_mem[0x3dfcff8] = 0x000000000090f003
+    P3 PA: 0x0000000002fda000
+    P2 PA: 0x0000000002fdb000
+    P1 PA: 0x0000000002fdc000
+  Set P4[63] = 0x0000000002fda003
+  DEBUG: Read back from guest_mem[0x3fff1f8] = 0x0000000002fda003
+  DEBUG: guest_mem[0x3fff1f8] KVA: 0x00000010042521f8
+  DEBUG: Maps to PA: 0x00000000031df000 + 0x1f8 = 0x00000000031df1f8
+  DEBUG: CR3 expects P4[63] at: 0x00000000031df000 + 0x1f8 = 0x00000000031df1f8
+  Set P3[511] = 0x0000000002fdb007
+  DEBUG: Read back from guest_mem[0x3dfaff8] = 0x0000000002fdb007
+  Set P2[511] = 0x0000000002fdc007
+  DEBUG: Read back from guest_mem[0x3dfbff8] = 0x0000000002fdc007
+  Set P1[510] = 0x0000000000a3e003 (trampoline page 1)
+  Set P1[511] = 0x0000000000a3d003 (trampoline page 2)
+  DEBUG: Read back P1[510] from guest_mem[0x3dfcff0] = 0x0000000000a3e003
+  DEBUG: Read back P1[511] from guest_mem[0x3dfcff8] = 0x0000000000a3d003
 ✓ Trampolines mapped in user page tables
 
 === Verifying User Page Table Trampoline Mappings ===
-User CR3: 0x00000000031d5000
-User CR3 (physical): 0x00000000031d5000
+User CR3: 0x00000000031df000
+User CR3 (physical): 0x00000000031df000
   Kernel CR3 (PA): 0x0000000000012000
-  User CR3 (PA):   0x00000000031d5000
+  User CR3 (PA):   0x00000000031df000
 
   User space layout:
     Entry point: 0x0000000000400000
-    Stack top:   0x0000000003df4000
+    Stack top:   0x0000000003df3ff0
 
   Setting up Kernel->User trampoline at 0x00001fffffffe000:
-    Trampoline code size: 504 bytes
+    Trampoline code size: 1080 bytes
     ✓ Code copied
 
   Setting up User->Kernel trampoline at 0x00001ffffffff000:
-    Trampoline code size: 72 bytes
+    Trampoline code size: 376 bytes
     ✓ Code copied
 
   Trampolines copied, will patch data sections after interrupt setup
 
 === Setting up user space interrupt handlers ===
-Handler code size: 439 bytes
-Original handler base: 0x00000010001d5500
-Kernel stack (for TSS.RSP0): 0x00000010001283c0
+Handler code size: 654 bytes
+Original handler base: 0x00000010001d8890
+Kernel stack (for TSS.RSP0): 0x0000001000128340
 
 === Setting up interrupt infrastructure ===
-✓ Installed 439 bytes of handler code at buffer offset 0x3df4000
+✓ Installed 654 bytes of handler code at buffer offset 0x3df4000
 ✓ Handler addresses adjusted for guest_mem
 Setting up GDT at 0x3df5d38
 ✓ GDT configured (80 bytes)
-Setting up TSS at 0x3df5d88, RSP0=0x10001283c0
+Setting up TSS at 0x3df5d88, RSP0=0x1000128340
 ✓ TSS configured, descriptor updated in GDT
 Setting up IDT at 0x3df5df0
+  IDT[32]: handler=0x3df4277, dpl=3, ist=1
+    Entry bytes: 77 42 08 00 01 ee df 03
+                 00 00 00 00 00 00 00 00
 ✓ IDT configured (33 entries)
 
 === Mapping Interrupt Infrastructure ===
-  Guest Mem Base KVA: 0x100024d000
+  Guest Mem Base KVA: 0x1000253000
   Mapping handler code: 0x3df4000 - 0x3df5000 (EXECUTABLE/READ/KERNEL)
 
 === map_user_range ===
   Mapping: user VA 0x3df4000 - 0x3df5000
-  From:    kernel VA 0x1004041000
+  From:    kernel VA 0x1004047000
   Size:    0x1000 (4 KB)
   Writable: false
   Kernel-accessible (no U bit): true
   table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
+  table_base KVA: 0x1004050000
   ✓ set_range completed
 
   Verifying mappings...
-  ✓ First page VA 0x3df4000 -> PA 0x2fca000
-  ✓ Last page VA 0x3df4000 -> PA 0x2fca000 (W=0 U=0)
+  ✓ First page VA 0x3df4000 -> PA 0x2fd4000
+  ✓ Last page VA 0x3df4000 -> PA 0x2fd4000 (W=0 U=0)
   ✓ All pages verified!
   Mapping GDT/TSS/IDT: 0x3df5000 - 0x3df6000 (READ/WRITE/KERNEL)
 
 === map_user_range ===
   Mapping: user VA 0x3df5000 - 0x3df6000
-  From:    kernel VA 0x1004042000
+  From:    kernel VA 0x1004048000
   Size:    0x1000 (4 KB)
   Writable: true
   Kernel-accessible (no U bit): true
   table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
+  table_base KVA: 0x1004050000
   ✓ set_range completed
 
   Verifying mappings...
-  ✓ First page VA 0x3df5000 -> PA 0x2fcb000
-  ✓ Last page VA 0x3df5000 -> PA 0x2fcb000 (W=1 U=0)
+  ✓ First page VA 0x3df5000 -> PA 0x2fd5000
+  ✓ Last page VA 0x3df5000 -> PA 0x2fd5000 (W=1 U=0)
   Checking stack-like mapping: will verify first push address 0x3df5ff8
-  ✓ First push address 0x3df5ff8 -> PA 0x2fcb000
+  ✓ First push address 0x3df5ff8 -> PA 0x2fd5000
     PTE flags: P=1 W=1 U=0
   ✓ All pages verified!
   Mapping Interrupt Stack: 0x3df6000 - 0x3dfd000 (READ/WRITE/KERNEL)
 
 === map_user_range ===
   Mapping: user VA 0x3df6000 - 0x3dfd000
-  From:    kernel VA 0x1004043000
+  From:    kernel VA 0x1004049000
   Size:    0x7000 (28 KB)
   Writable: true
   Kernel-accessible (no U bit): true
   table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
+  table_base KVA: 0x1004050000
   ✓ set_range completed
 
   Verifying mappings...
-  ✓ First page VA 0x3df6000 -> PA 0x2fcc000
-  ✓ Last page VA 0x3dfc000 -> PA 0x2fd2000 (W=1 U=0)
+  ✓ First page VA 0x3df6000 -> PA 0x2fd6000
+  ✓ Last page VA 0x3dfc000 -> PA 0x2fdc000 (W=1 U=0)
   Checking stack-like mapping: will verify first push address 0x3dfcff8
-  ✓ First push address 0x3dfcff8 -> PA 0x2fd2000
+  ✓ First push address 0x3dfcff8 -> PA 0x2fdc000
     PTE flags: P=1 W=1 U=0
   ✓ All pages verified!
 ✓ Interrupt infrastructure mapped (via map_user_range)
@@ -354,14 +1671,14 @@ Setting up IDT at 0x3df5df0
 
 
   VERIFY: Walking page tables for GDT UVA 0x3df5d38...
-    ✓ GDT UVA 0x3df5d38 -> PA 0x2fcbd38 Flags=0x2fcb003
+    ✓ GDT UVA 0x3df5d38 -> PA 0x2fd5d38 Flags=0x2fd5003
   VERIFY: Walking page tables for TSS UVA 0x3df5d88...
-    ✓ TSS UVA 0x3df5d88 -> PA 0x2fcbd88 Flags=0x2fcb003
+    ✓ TSS UVA 0x3df5d88 -> PA 0x2fd5d88 Flags=0x2fd5003
 
 Patching User->Kernel trampoline address into INT 32 handler...
-  Trampoline field offset in handler code: 0x1ad
+  Trampoline field offset in handler code: 0x284
   Handler code starts at: 0x3df4000
-  Trampoline field at: 0x3df41ad
+  Trampoline field at: 0x3df4284
   Patching with U->K trampoline VA: 0x00001ffffffff000
   Verification: read back 0x00001ffffffff000
   ✓ Trampoline address patched successfully!
@@ -369,39 +1686,40 @@ Patching User->Kernel trampoline address into INT 32 handler...
 Patching trampoline data sections...
 
   K->U trampoline data:
-    Computing address: 0x00001fffffffe000 + 0x1b8 = 0x00001fffffffe1b8
-    user_cr3 = 0x00000000031d5000 (offset 0x1b8)
-    CRITICAL: user_stack_top offset = 0x1e8 (488)
-    Writing to address: 0x00001fffffffe1e8
-    user_rsp = 0x0000000003df4000 (offset 0x1e8)
-    Verification: read back 0x0000000003df4000
-    DEBUG: LEA will compute address: 0x00001fffffffe1e8
-    DEBUG: Reading from LEA address via kernel PT: 0x0000000003df4000
-    DEBUG: Kernel PT maps data address 0x00001fffffffe1e8 -> PA 0x0000000000a2c1e8
-    DEBUG: User PT maps data address   0x00001fffffffe1e8 -> PA 0x0000000000a2c1e8
-    DEBUG: Reading from PA 10666472 via direct map: 0x0000000003df4000
-    user_entry = 0x0000000000400000 (offset 0x1f0)
-    gdt_desc = 0x004f:0x0000000003df5d38 (offset 0x1c0)
-    idt_desc = 0x020f:0x0000000003df5df0 (offset 0x1d0)
-    tss_selector = 0x0028 (offset 0x1e0)
+    Computing address: 0x00001fffffffe000 + 0x3f8 = 0x00001fffffffe3f8
+    user_cr3 = 0x00000000031df000 (offset 0x3f8)
+    CRITICAL: user_stack_top offset = 0x428 (1064)
+    Writing to address: 0x00001fffffffe428
+    user_rsp = 0x0000000003df3ff0 (offset 0x428)
+    Verification: read back 0x0000000003df3ff0
+    DEBUG: LEA will compute address: 0x00001fffffffe428
+    DEBUG: Reading from LEA address via kernel PT: 0x0000000003df3ff0
+    DEBUG: Kernel PT maps data address 0x00001fffffffe428 -> PA 0x0000000000a3e428
+    DEBUG: User PT maps data address   0x00001fffffffe428 -> PA 0x0000000000a3e428
+    DEBUG: Reading from PA 10740776 via direct map: 0x0000000003df3ff0
+    user_entry = 0x0000000000400000 (offset 0x430)
+    gdt_desc = 0x004f:0x0000000003df5d38 (offset 0x400)
+    idt_desc = 0x020f:0x0000000003df5df0 (offset 0x410)
+    tss_selector = 0x0028 (offset 0x420)
 
   U->K trampoline data:
-    kernel_cr3 = 0x0000000000012000 (offset 0x38)
-    kernel_rsp_restore = 0x00001fffffffe1b0 (offset 0x40)
+    kernel_cr3 = 0x0000000000012000 (offset 0x168)
+    u2k_rsp_save_addr = 0x00001ffffffff170 (offset 0x3f0)
   ✓ Trampoline data sections patched!
 
-✓ User CR3 written to AP task info: 0x00000000031d5000
+✓ User CR3 written to AP task info: 0x00000000031df000
 ✓ Kernel CR3 written to AP task info: 0x0000000000012000
 ✓ Interrupt config written to AP task info
-  GDT: base=0x1004041dc8, limit=79
-  IDT: base=0x1004041e80, limit=527
-  TSS: base=0x1004041e18, selector=0x28
+  GDT: base=0x1004048d38, limit=79
+  IDT: base=0x1004048df0, limit=527
+  TSS: base=0x1004048d88, selector=0x28
 ✓ Trampoline addresses written to AP task info
   K->U trampoline: 0x00001fffffffe000
   U->K trampoline: 0x00001ffffffff000
 
 === DEBUG: Verifying GDT/TSS Memory ===
-  GDT Base: 0x1004041dc8
+  GDT Base (KVA): 0x1004048d38
+  GDT Page KVA 0x1004048000 -> PA 0x2fd5000
     Entry 0: 0x0000000000000000
     Entry 1: 0x00af9a000000ffff
     Entry 2: 0x00af92000000ffff
@@ -412,17 +1730,20 @@ Patching trampoline data sections...
     Entry 7: 0x0000000000000000
     Entry 8: 0x0000000000000000
     Entry 9: 0x0000000000000000
+    GDT[0x28] bytes via KVA: 67 00 88 5d df 89 00 03 
+    GDT KVA 0x1004048d38 -> PA 0x2fd5d38
+    GDT[0x28] bytes via PA 0x2fd5d60: 67 00 88 5d df 89 00 03 
   GDT Limit: 79
-  TSS Base: 0x1004041e18
+  TSS Base: 0x1004048d88
     TSS[0] (reserved): 0x03dfa00000000000
-    TSS[1] (RSP0):     0x0000000000000000
-    TSS[2] (RSP1):     0x0000000000000000
+    TSS[1] (RSP0):     0x03dfa00000000000
+    TSS[2] (RSP1):     0x03dfa00000000000
     TSS[3] (RSP2):     0x0000000000000000
     TSS[4] (IST1..):   0x03dfa00000000000
     TSS[12] (I/O Map): 0x0068000000000000
 === DEBUG END ===
 
-✓ AP task info at: 0x100024adc0
+✓ AP task info at: 0x1000250dc0
 
 Testing with 2 CPUs (1 BSP + 1 AP)
 Setting up trampoline:
@@ -442,25 +1763,25 @@ Setting page table address to 0x12000
 ✓ Page table address set at offset 0x2000
 Page table set: 0x12000
   CPU 1 stack in low memory: 0x90000
-  Entry address for CPU 1: 0x10001e06c0
-Initializing CPU 1: APIC ID=1, entry=0x10001e06c0, stack=0x90000, task_info=0x100024adc0
+  Entry address for CPU 1: 0x10001e4858
+Initializing CPU 1: APIC ID=1, entry=0x10001e4858, stack=0x90000, task_info=0x1000250dc0
 ✓ CPU 1 initialized at offset 0x2080
 Initialized CPU 1 (APIC ID 1)
 Starting CPU 1...
   About to send SIPI...
   SIPI vector: 0x8 (physical addr=0x8000)
-TLS initialized at 0x0000001000248bd8
+TLS initialized at 0x000000100024ebd8
 Runtime init complete
 CPU 1 online! APIC ID: 1
-TLS base: 0x0000001000248bd8
+TLS base: 0x000000100024ebd8
 TSS RSP0 set to: 0x000000000008fe98
-TSS descriptor set at GDT+0x28, TSS base: 0x0000001000248008
-IDT loaded at: 0x000000100024abb0 limit: 527
+TSS descriptor set at GDT+0x28, TSS base: 0x000000100024e008
+IDT loaded at: 0x0000001000250bb0 limit: 527
 TSS loaded with selector: 0x0028
 Exception handlers installed
 Reading task info from shared memory...
   User code entry point: 0x0000000000011630
-  User CR3: 0x00000000031d5000
+  User CR3: 0x00000000031df000
   K->U trampoline: 0x00001fffffffe000
   U->K trampoline: 0x00001ffffffff000
 Task status set to RUNNING
@@ -479,18 +1800,42 @@ Expected flow:
 ==========================================================
 
 DEBUG: K->U trampoline data section (from Rust):
-  Data start address: 0x00001fffffffe1b0
+  Data start address: 0x00001fffffffe3e8
   [0] kernel_rsp_save:  0x0000000000000000
-  [1] user_cr3_value:   0x00000000031d5000
-  [2] gdt_desc[0]:      0x000003df5d38004f
-  [3] gdt_desc[1]:      0x0000000000000000
-  [4] idt_desc[0]:      0x000003df5df0020f
-  [5] idt_desc[1]:      0x0000000000000000
-  [6] tss_selector:     0x0000000000000028
-  [7] user_stack_top:   0x0000000003df4000
-  [8] user_entry_point: 0x0000000000400000
+  [1] user_cr3_value:   0x00001ffffffff170
+  [2] gdt_desc[0]:      0x00000000031df000
+  [3] gdt_desc[1]:      0x000003df5d38004f
+  [4] idt_desc[0]:      0x0000000000000000
+  [5] idt_desc[1]:      0x000003df5df0020f
+  [6] tss_selector:     0x0000000000000000
+  [7] user_stack_top:   0x0000000000000028
+  [8] user_entry_point: 0x0000000003df3ff0
 
 DEBUG: Code at 0x00001fffffffe000: b0 40 66 ba f8 03 ee b0
 DEBUG: Executing direct UART write '!' to confirm liveness...
 !DEBUG: Invoking function pointer...
-@K00000000031D5000C�D[000000000008FE80|00000000031D5000|000003DF5D38004F|0000000000000000|000003DF5DF0020F|0000000000000000|0000000000000028|0000000003DF4000|0000000000400000]00001FFFFFFFE1E8:L0000000003DF4000 +GI
+@K00000000031DF000C�D[000000000008FE60|00001FFFFFFFF170|00000000031DF000|000003DF5D38004F|0000000000000000|000003DF5DF0020F|0000000000000000|0000000000000028|0000000003DF3FF0]00001FFFFFFFE428:L0000000003DF3FF0 +GI0000000003DF5D38g67:TS0000000003DFA000:UCBEEFCAFEBABEBB48:RH0000000003DF4277XXS000000000008FE60 G0000000080700037 I001000250BB0020F V001000250BB0020F K RA:00000010001E5C18!
+
+$$$
+
+==========================================================
+✓ SUCCESS! Returned from user space!
+==========================================================
+What just happened:
+  1. K->U trampoline switched to user CR3
+  2. K->U trampoline jumped to user code at 0x11630
+  3. User code ran and triggered INT 32
+  4. INT 32 handler jumped to U->K trampoline at 0x00001ffffffff000
+  5. U->K trampoline switched back to kernel CR3
+  6. U->K trampoline restored kernel RSP and returned here!
+==========================================================
+
+✓ CPU 1 completed task successfully
+Halting CPU 1...
+  CPU 1 came online! State: 2
+All CPUs started!
+
+=== Monitoring AP Task Execution ===
+✓ AP completed ELF execution!
+
+=== Main boot sequence complete! ===
