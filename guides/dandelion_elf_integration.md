@@ -11,6 +11,211 @@ Dandelion SDK creates ELF executables with a standardized interface for I/O thro
 4. Executing the user code
 5. Reading output data from the context after execution
 
+## The Dandelion Port Module
+
+The `src/dandelion_port/` directory contains a portable implementation ready to be integrated into Dandelion's engine architecture. The module structure:
+
+```
+dandelion_port/
+├── mod.rs              # Core types: UnikraftContext, UnikraftLayout, errors
+├── x86_64.rs           # Page table and interrupt table setup (dynamic allocation)
+├── handlers.rs         # Interrupt handlers 0-32 using global_asm!
+├── trampolines.rs      # K2U/U2K trampolines using global_asm!
+├── ap_startup.rs       # AP management: CpuData, CorePool, task distribution
+└── boot_trampoline.rs  # Boot trampoline: 16-bit → 32-bit → 64-bit transitions
+```
+
+---
+
+## Boot Trampoline Setup (AP Startup)
+
+The boot trampoline is required to bring Application Processors (APs) from reset state to 64-bit long mode. This section explains the setup process.
+
+### Why Fixed Physical Address?
+
+The SIPI (Startup Inter-Processor Interrupt) mechanism requires:
+
+1. **Physical Address < 1MB**: The SIPI vector is a physical page number (0x00-0xFF), so the trampoline must be at address `vector << 12` (e.g., vector 0x08 → address 0x8000).
+
+2. **No RIP-Relative Addressing**: In 16-bit real mode and early 32-bit protected mode, we cannot use RIP-relative addressing. The code must use absolute addresses that are known at assembly time.
+
+3. **Identity Mapping Required**: After setting CR3 with the kernel page tables, instruction fetching continues from the same physical address. If this address isn't identity-mapped (VA == PA), the CPU will fetch garbage and crash.
+
+### Using Directmap to Access Low Memory
+
+Unikraft provides a directmap region at `0xffffff8000000000` that maps all physical memory:
+
+```
+Virtual Address = DIRECTMAP_BASE + Physical Address
+                = 0xffffff8000000000 + 0x8000
+                = 0xffffff8000008000
+```
+
+This allows the BSP (Boot Strap Processor) to copy the trampoline code to low physical memory without special setup:
+
+```rust
+use dandelion_port::boot_trampoline::{
+    setup_boot_trampoline, BootTrampolineConfig, DIRECTMAP_BASE
+};
+
+unsafe {
+    let config = BootTrampolineConfig {
+        target_phys_addr: 0x8000,    // Physical address for trampoline
+        kernel_pml4_phys: cr3_value,  // Kernel's page table
+        directmap_base: DIRECTMAP_BASE,
+    };
+    
+    let sipi_vector = setup_boot_trampoline(&config);
+    // sipi_vector = 0x08 (for address 0x8000)
+}
+```
+
+### Boot Sequence
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ BSP sends INIT IPI to AP                                                     │
+│     ↓                                                                       │
+│ BSP sends SIPI with vector (e.g., 0x08 → address 0x8000)                    │
+│     ↓                                                                       │
+│ AP starts at 0x8000 in 16-bit Real Mode                                     │
+│     ↓                                                                       │
+│ port_lcpu_start16_ap:                                                       │
+│   - Clear segment registers                                                 │
+│   - Jump to lcpu_start16 (CS-relative)                                      │
+│     ↓                                                                       │
+│ port_lcpu_start16:                                                          │
+│   - Set CR0.PE (Protected Mode Enable)                                      │
+│   - Load 32-bit GDT                                                         │
+│   - Far jump to 32-bit code segment                                         │
+│     ↓                                                                       │
+│ port_lcpu_start32:                                                          │
+│   - Set CR4.PAE (Physical Address Extension)                                │
+│   - Set EFER.LME (Long Mode Enable)                                         │
+│   - Load CR3 with kernel page tables (from patched port_x86_bpt_pml4_addr)  │
+│   - Set CR0.PG (Paging Enable)                                              │
+│   - Load 64-bit GDT                                                         │
+│   - Far jump to 64-bit code segment                                         │
+│     ↓                                                                       │
+│ port_lcpu_start64:                                                          │
+│   - Get APIC ID via CPUID                                                   │
+│   - Calculate CpuData pointer: &port_lcpus[apic_id]                         │
+│   - Enable FPU, SSE, XSAVE, AVX, FSGSBASE                                   │
+│   - Load entry point and stack from CpuData                                 │
+│   - Jump to Rust entry point with CpuData as argument                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Page Table Requirements for AP Boot
+
+The kernel page tables (passed via CR3) must include:
+
+1. **Identity mapping of low memory** (0x0000 - 0x100000): Required for instruction fetching during and immediately after the CR3 switch in `port_lcpu_start32`.
+
+2. **Kernel code mapping**: So the AP can execute the Rust entry point.
+
+3. **Directmap region**: So the AP can access physical memory.
+
+### CpuData Structure
+
+Each AP reads its configuration from the `port_lcpus` array, indexed by APIC ID:
+
+```rust
+#[repr(C, align(64))]
+pub struct CpuData {
+    pub state: i32,           // CPU state (OFFLINE, INIT, IDLE, BUSY, HALTED)
+    pub idx: u32,             // CPU index (0, 1, 2, ...)
+    pub id: u32,              // APIC ID
+    _pad0: u32,
+    pub entry: u64,           // Entry point address (Rust function)
+    pub stackp: u64,          // Stack pointer
+    pub task_info_ptr: u64,   // Pointer to work queue / task info
+    _reserved: [u64; 4],
+}
+```
+
+BSP must initialize CpuData before sending SIPI:
+
+```rust
+use dandelion_port::boot_trampoline::init_cpu_data;
+
+unsafe {
+    init_cpu_data(
+        0x8000,                    // Trampoline physical address
+        DIRECTMAP_BASE,            // Directmap base
+        cpu_index,                 // CPU index (for lcpus array)
+        ap_rust_entry as u64,      // Rust function to call
+        stack_top,                 // AP's stack pointer
+    );
+}
+```
+
+### Complete AP Boot Example
+
+```rust
+use dandelion_port::boot_trampoline::{
+    setup_boot_trampoline, init_cpu_data, get_cpu_data,
+    BootTrampolineConfig, DIRECTMAP_BASE, cpu_state,
+};
+
+/// BSP function to start an AP
+pub unsafe fn start_ap(cpu_index: usize, stack_top: u64) {
+    let trampoline_addr = 0x8000u64;
+    
+    // 1. Setup boot trampoline (only once for all APs)
+    static TRAMPOLINE_SETUP: core::sync::atomic::AtomicBool = 
+        core::sync::atomic::AtomicBool::new(false);
+    
+    if !TRAMPOLINE_SETUP.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        let config = BootTrampolineConfig {
+            target_phys_addr: trampoline_addr,
+            kernel_pml4_phys: get_kernel_cr3(),
+            directmap_base: DIRECTMAP_BASE,
+        };
+        setup_boot_trampoline(&config);
+    }
+    
+    // 2. Initialize this AP's CpuData
+    init_cpu_data(
+        trampoline_addr,
+        DIRECTMAP_BASE,
+        cpu_index,
+        ap_entry as u64,
+        stack_top,
+    );
+    
+    // 3. Send INIT IPI
+    send_init_ipi(cpu_index);
+    delay_10ms();
+    
+    // 4. Send SIPI (twice, as per Intel spec)
+    let sipi_vector = (trampoline_addr >> 12) as u8;
+    send_sipi(cpu_index, sipi_vector);
+    delay_200us();
+    send_sipi(cpu_index, sipi_vector);
+    
+    // 5. Wait for AP to reach INIT state
+    let cpu_data = get_cpu_data(trampoline_addr, DIRECTMAP_BASE, cpu_index);
+    while (*cpu_data).state == cpu_state::OFFLINE {
+        core::hint::spin_loop();
+    }
+}
+
+/// AP entry point (called from boot trampoline)
+extern "C" fn ap_entry(cpu_data: *mut CpuData) {
+    // AP is now in 64-bit mode with stack set up
+    // cpu_data contains our configuration
+    
+    unsafe {
+        (*cpu_data).state = cpu_state::IDLE;
+    }
+    
+    // Enter work loop...
+}
+```
+
+---
+
 ## 1. ELF Parsing
 
 ### Dandelion Approach
@@ -441,3 +646,199 @@ To support Dandelion ELF files, we need to:
 - ❌ Adapt memory layout for input/output data
 
 The most significant gap is the **I/O interface**. Dandelion's structured input/output mechanism through `DandelionSystemData` is what makes the SDK usable for real workloads.
+
+---
+
+## Appendix: dandelion_port Module Reference
+
+### mod.rs - Core Types
+
+Core types and module exports for the Unikraft execution engine.
+
+**Key Types:**
+- `UnikraftContext` - Analogous to `KvmContext`, holds guest memory and layout
+- `UnikraftLayout` - Pre-computed offsets for page tables, GDT, TSS, IDT, handlers
+- `DandelionSystemData` - The I/O interface structure (must match SDK)
+- `UnikraftError` - Error types matching Dandelion's error conventions
+
+### x86_64.rs - Page Tables and Interrupt Tables
+
+Dynamic page table and interrupt table setup, plus architecture utilities.
+
+**Key Functions:**
+- `calculate_page_table_pages(context_size)` - Calculates pages needed for PML4+PDPT+PD+PT
+- `set_page_table(buffer, context_size)` - Creates 4-level page tables dynamically
+- `set_interrupt_table(buffer, layout)` - Sets up GDT, TSS, IDT with assembly handlers
+- `virt_to_phys(cr3, va)` - Walk page tables to translate virtual to physical
+- `map_page(cr3, va, pa, flags, allocator)` - Add a mapping to existing page tables
+- `init_ap_tls()` - Initialize Thread-Local Storage for an AP
+
+**Design Notes:**
+- Page tables scale with context size (up to 512 GB with full PDPT)
+- Uses assembly (`global_asm!`) for handlers, avoiding bytecode arrays
+- All user pages marked as USER | PRESENT | WRITABLE (can be refined per-segment)
+- `DIRECTMAP_BASE` (0xffffff8000000000) used for physical memory access
+
+### handlers.rs - Interrupt Handlers
+
+Interrupt handlers for vectors 0-32 using `global_asm!` macros.
+
+**Handler Types:**
+- Vectors without error code: 0-7, 9, 15-16, 18-20, 28-31
+- Vectors with error code: 8, 10-14, 17, 21, 29-30
+
+**Key Functions:**
+- `patch_handlers(buffer, layout)` - Writes handler addresses and patches code
+- `port_common_handler` - Common interrupt path, jumps to U2K trampoline
+
+### trampolines.rs - K2U/U2K Context Switches
+
+CR3-switching trampolines using `global_asm!`.
+
+**Trampolines:**
+- `port_trampoline_k2u` - Kernel to User: loads user GDT/CR3/IDT/TSS, `IRETQ` to user
+- `port_trampoline_u2k` - User to Kernel: restores kernel context, returns to caller
+
+**Key Functions:**
+- `patch_k2u(buffer, layout)` - Patches K2U with user descriptor addresses
+- `patch_u2k(buffer, layout)` - Patches U2K with kernel state locations
+
+### ap_startup.rs - AP Management
+
+Application Processor lifecycle and work distribution.
+
+**Key Types:**
+- `CpuData` - Per-CPU state (replicated in boot_trampoline.rs for assembly access)
+- `ApTaskInfo` - Work item for APs (context pointer, function pointer)
+- `CorePool` - Manages available cores and work assignment
+
+**x2APIC Functions (for sending IPIs):**
+- `x2apic_supported()` - Check CPUID for x2APIC support
+- `x2apic_enable()` - Enable x2APIC mode on current CPU
+- `send_init_ipi(apic_id)` - Send INIT IPI to target
+- `send_startup_ipi(apic_id, vector)` - Send SIPI to target
+
+**Key Functions:**
+- `setup_ap(idx, apic_id, stack)` - Prepare CpuData for an AP
+- `wake_ap(apic_id, sipi_vector)` - Complete INIT-SIPI-SIPI sequence
+- `ap_work_loop(cpu_data)` - AP's main loop: wait for work, execute, signal done
+- `delay_us(us)`, `delay_ms(ms)` - Busy-wait delays for IPI timing
+
+### boot_trampoline.rs - Real Mode to Long Mode
+
+16-bit → 32-bit → 64-bit boot trampoline for AP startup.
+
+**Key Constants:**
+- `DIRECTMAP_BASE` = 0xffffff8000000000 - Unikraft's physical memory mapping
+- `DEFAULT_TRAMPOLINE_ADDR` = 0x8000 - Default physical address for trampoline
+- `LCPU_SIZE` = 64 - Size of CpuData structure
+
+**Key Functions:**
+- `setup_boot_trampoline(config)` - Copy trampoline to low memory via directmap
+- `init_cpu_data(...)` - Initialize CpuData for an AP before SIPI
+- `get_trampoline_code()` - Get raw trampoline bytes for inspection
+
+**Assembly Sections:**
+- `.text.port_boot16` - 16-bit real mode entry and GDT32
+- `.text.port_boot32` - Protected mode, enables long mode and paging
+- `.text.port_boot64` - Long mode, enables FPU/SSE/AVX, jumps to Rust
+- `.data.port_boot` - Patchable data: `port_x86_bpt_pml4_addr`, `port_lcpus`
+
+---
+
+## Integration Checklist
+
+When porting to Dandelion, verify:
+
+### Boot Trampoline Setup
+- [ ] Low physical memory (0x8000) is reserved and not used by kernel
+- [ ] Page tables include identity mapping of trampoline address (< 1MB)
+- [ ] `BootTrampolineConfig.kernel_pml4_phys` is the physical address of PML4
+- [ ] Directmap region is accessible for copying trampoline
+
+### Per-AP Setup
+- [ ] Each AP has a unique stack allocation (≥ 16KB recommended)
+- [ ] CpuData is initialized with entry point and stack before SIPI
+- [ ] APIC IDs are correctly enumerated (ACPI MADT or CPUID)
+- [ ] TLS is initialized for each AP after boot (`init_ap_tls()`)
+
+### IPI Sequence
+- [ ] x2APIC is enabled on BSP before sending IPIs
+- [ ] INIT-SIPI-SIPI follows Intel timing (10ms after INIT, 200μs between SIPIs)
+- [ ] Destination APIC IDs match the target APs
+
+### User Space Setup
+- [ ] K2U/U2K trampolines are patched with correct addresses
+- [ ] IDT handlers point to patched handler code
+- [ ] GDT has user code/data segments with DPL=3
+- [ ] TSS has IST entry for interrupt stack
+- [ ] User CR3 has identity mapping of trampolines (high VA)
+
+### Code Quality
+- [ ] All assembly uses `global_asm!` (no bytecode arrays)
+- [ ] No debug prints in production trampolines/handlers
+- [ ] Atomic operations use correct memory ordering
+- [ ] Volatile reads/writes for cross-core communication
+
+---
+
+## What's NOT in the Port (Must Be Provided by Dandelion)
+
+The following components are **not** included in `dandelion_port/` and must come from the Dandelion framework:
+
+1. **Memory Allocator** - For allocating AP stacks, TLS areas, and page table pages
+2. **ACPI/MADT Parsing** - To enumerate available CPUs and their APIC IDs
+3. **ELF Loader Integration** - `elfloader/` exists but integration with engine loop is external
+4. **I/O Interface** - `setup_input_structs()` / `read_output_structs()` implementations
+5. **Engine Loop Trait** - The `EngineLoop` trait implementation wrapping these primitives
+6. **Error Propagation** - Mapping `UnikraftError` to `DandelionError`
+
+---
+
+## Quick Start Integration Sketch
+
+```rust
+// Pseudocode for Dandelion integration
+
+use dandelion_port::{
+    ap_startup::{wake_ap, ApTaskInfo, CorePool, x2apic_enable},
+    boot_trampoline::{setup_boot_trampoline, init_cpu_data, BootTrampolineConfig},
+    x86_64::{set_page_table, set_interrupt_table, virt_to_phys, init_ap_tls},
+    trampolines::{patch_k2u, patch_u2k},
+    handlers::patch_handlers,
+    UnikraftContext, UnikraftLayout,
+};
+
+impl EngineLoop for UnikraftLoop {
+    fn run(&mut self, context: &mut Context) -> DandelionResult<()> {
+        // 1. Get a free core from pool
+        let core_id = self.core_pool.acquire_core()?;
+        
+        // 2. Set up task info
+        let task_info = self.core_pool.get_task_info(core_id);
+        task_info.setup_task(
+            context.entry_point,
+            context.user_cr3,
+            self.kernel_cr3,
+            context.layout.k2u_entry_va,
+            context.layout.u2k_entry_va,
+            // ... GDT/IDT/TSS info
+        );
+        
+        // 3. Wake the AP (it will execute and signal completion)
+        unsafe { wake_ap(self.apic_ids[core_id], self.sipi_vector); }
+        
+        // 4. Wait for completion
+        let status = task_info.wait_for_completion();
+        
+        // 5. Release core
+        self.core_pool.release_core(core_id);
+        
+        match status {
+            2 => Ok(()),  // Done
+            3 => Err(DandelionError::EngineError),
+            _ => Err(DandelionError::EngineError),
+        }
+    }
+}
+```

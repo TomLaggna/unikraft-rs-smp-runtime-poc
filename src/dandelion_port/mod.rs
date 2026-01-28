@@ -28,6 +28,8 @@
 //! | CR3 management | KVM internal | Explicit CR3 switching |
 //! | Interrupt handling | KVM vCPU | Custom IDT in user space |
 
+pub mod ap_startup;
+pub mod boot_trampoline;
 pub mod handlers;
 pub mod trampolines;
 pub mod x86_64;

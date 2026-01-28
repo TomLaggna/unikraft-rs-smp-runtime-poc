@@ -4,306 +4,469 @@
 //! by switching CR3 (page tables), loading appropriate GDT/IDT/TSS, and
 //! managing the stack pointer.
 //!
-//! # K2U (Kernel to User) Trampoline
-//! 1. Save kernel GDT/IDT on stack
-//! 2. Save kernel RSP to U2K data section
-//! 3. Switch CR3 to user page tables
-//! 4. Load user GDT/IDT/TSS
-//! 5. Switch to user stack
-//! 6. Build IRETQ frame and transition to Ring 3
+//! # Architecture
 //!
-//! # U2K (User to Kernel) Trampoline
-//! 1. Switch CR3 to kernel page tables
+//! ## Kernel-to-User (K2U) Trampoline
+//! 1. Save kernel RSP to data section (for U2K to restore)
+//! 2. Switch CR3 to user page tables
+//! 3. Load user GDT/IDT/TSS
+//! 4. Build IRET frame and IRET to Ring 3
+//!
+//! ## User-to-Kernel (U2K) Trampoline
+//! 1. Switch CR3 back to kernel page tables
 //! 2. Restore kernel RSP
-//! 3. Restore kernel GDT/IDT from stack
-//! 4. Return to kernel caller
+//! 3. Restore kernel GDT/IDT
+//! 4. Return to kernel code
+//!
+//! # Important: Both trampolines must be mapped at the same VA in both
+//! kernel and user page tables so CR3 switch doesn't cause page fault.
 
-use super::{PAGE_SIZE, UnikraftResult, UnikraftError};
+use core::arch::global_asm;
 
 // ============================================================================
-// Trampoline Code (Position-Independent)
+// K2U Trampoline - Kernel to User
 // ============================================================================
 
-/// K2U trampoline binary code
-/// 
-/// This is assembled from the K2U trampoline, stripped of debug output.
-/// The data section starts at K2U_DATA_OFFSET bytes from the start.
-pub static K2U_CODE: &[u8] = include_bytes!("k2u_trampoline.bin");
+global_asm!(
+    r#"
+.section .text.port_k2u, "ax"
+.align 16
 
-/// U2K trampoline binary code
-pub static U2K_CODE: &[u8] = include_bytes!("u2k_trampoline.bin");
+// Entry point for Kernel-to-User transition
+// Called from kernel code with kernel page tables active
+//
+// Data section fields (patched before call):
+// - kernel_rsp_save: Where to save kernel RSP
+// - user_cr3_value: CR3 value for user page tables
+// - gdt_desc: 10-byte GDT descriptor (limit + base)
+// - idt_desc: 10-byte IDT descriptor (limit + base)
+// - tss_selector: TSS segment selector
+// - user_stack_top: User mode RSP
+// - user_entry_point: User code entry point (RIP for IRET)
 
-// Since we can't include_bytes from non-existent files during development,
-// we'll define the trampolines as assembly that gets assembled at build time.
-// For now, provide the raw bytes and offsets.
+.globl port_trampoline_k2u
+port_trampoline_k2u:
+    // Save registers we'll use
+    push rax
+    push rdx
+    push rcx
 
-/// K2U trampoline machine code (position-independent)
-/// 
-/// This code:
-/// 1. Saves kernel GDT/IDT descriptors on stack (16 bytes each)
-/// 2. Saves kernel RSP to [u2k_rsp_save_addr]
-/// 3. Loads user CR3
-/// 4. Loads user GDT, IDT, TSS
-/// 5. Switches to user stack
-/// 6. Builds IRETQ frame and transitions to Ring 3
+    // ================================================================
+    // SAVE KERNEL STATE
+    // Save kernel GDT/IDT on stack so U2K can restore them
+    // ================================================================
+
+    // Save kernel IDT (push first = restore last)
+    sub rsp, 16
+    sidt [rsp]
+
+    // Save kernel GDT
+    sub rsp, 16
+    sgdt [rsp]
+
+    // Save kernel RSP to U2K data section
+    // Both trampolines are mapped in both address spaces
+    lea rax, [rip + port_u2k_kernel_rsp_restore]
+    mov [rax], rsp
+
+    // Also save locally for debugging
+    lea rax, [rip + port_k2u_kernel_rsp_save]
+    mov [rax], rsp
+
+    // ================================================================
+    // SWITCH TO USER ADDRESS SPACE
+    // After this, kernel stack is unmapped!
+    // ================================================================
+
+    lea rax, [rip + port_k2u_user_cr3_value]
+    mov rax, [rax]
+    mov cr3, rax
+
+    // ================================================================
+    // LOAD USER GDT/IDT/TSS
+    // These are now accessible via user page tables
+    // ================================================================
+
+    // Switch to user stack first (still Ring 0, but user mapping)
+    lea rax, [rip + port_k2u_user_stack_top]
+    mov rsp, [rax]
+
+    // Load user GDT
+    lea rax, [rip + port_k2u_gdt_desc]
+    lgdt [rax]
+
+    // Load user IDT
+    lea rax, [rip + port_k2u_idt_desc]
+    lidt [rax]
+
+    // Load TSS
+    lea rax, [rip + port_k2u_tss_selector]
+    mov ax, [rax]
+    ltr ax
+
+    // ================================================================
+    // BUILD IRET FRAME FOR RING 3 TRANSITION
+    // Stack layout for IRET (bottom to top):
+    //   SS, RSP, RFLAGS, CS, RIP
+    // ================================================================
+
+    // SS: User data selector with RPL=3 (0x23)
+    push 0x23
+
+    // RSP: User stack
+    lea rax, [rip + port_k2u_user_stack_top]
+    mov rax, [rax]
+    push rax
+
+    // RFLAGS: Enable interrupts (IF=1)
+    pushfq
+    pop rax
+    or rax, 0x200      // Set IF
+    and rax, ~0x100    // Clear TF (trap flag)
+    push rax
+
+    // CS: User code selector with RPL=3 (0x1B)
+    push 0x1B
+
+    // RIP: User entry point
+    lea rax, [rip + port_k2u_user_entry_point]
+    mov rax, [rax]
+    push rax
+
+    // ================================================================
+    // TRANSITION TO RING 3
+    // ================================================================
+    iretq
+
+// ================================================================
+// K2U Data Section (patched at runtime)
+// All fields 8-byte aligned
+// ================================================================
+.align 8
+.globl port_k2u_data_start
+port_k2u_data_start:
+
+.globl port_k2u_kernel_rsp_save
+port_k2u_kernel_rsp_save:
+    .quad 0
+
+.globl port_k2u_user_cr3_value
+port_k2u_user_cr3_value:
+    .quad 0
+
+// GDT descriptor: 2-byte limit + 8-byte base
+.globl port_k2u_gdt_desc
+port_k2u_gdt_desc:
+    .word 0          // limit
+    .quad 0          // base
+    .space 6         // padding to 16 bytes
+
+// IDT descriptor: 2-byte limit + 8-byte base
+.globl port_k2u_idt_desc
+port_k2u_idt_desc:
+    .word 0          // limit
+    .quad 0          // base
+    .space 6         // padding to 16 bytes
+
+.globl port_k2u_tss_selector
+port_k2u_tss_selector:
+    .word 0
+    .space 6         // padding
+
+.globl port_k2u_user_stack_top
+port_k2u_user_stack_top:
+    .quad 0
+
+.globl port_k2u_user_entry_point
+port_k2u_user_entry_point:
+    .quad 0
+
+.globl port_k2u_data_end
+port_k2u_data_end:
+
+.globl port_trampoline_k2u_end
+port_trampoline_k2u_end:
+"#
+);
+
+// ============================================================================
+// U2K Trampoline - User to Kernel
+// ============================================================================
+
+global_asm!(
+    r#"
+.section .text.port_u2k, "ax"
+.align 16
+
+// Entry point for User-to-Kernel transition
+// Called from interrupt handler (INT 32) when user code wants to return
+//
+// At entry:
+// - Running at Ring 0 (via interrupt gate)
+// - CR3 still points to user page tables
+// - RSP is interrupt stack (from TSS.RSP0)
+//
+// Data section fields (patched before user entry):
+// - kernel_cr3_value: CR3 value for kernel page tables
+// - kernel_rsp_restore: Saved kernel RSP from K2U
+
+.globl port_trampoline_u2k
+port_trampoline_u2k:
+    // ================================================================
+    // SWITCH BACK TO KERNEL ADDRESS SPACE
+    // ================================================================
+
+    lea rax, [rip + port_u2k_kernel_cr3_value]
+    mov rax, [rax]
+    mov cr3, rax
+
+    // ================================================================
+    // RESTORE KERNEL STATE
+    // Kernel stack is now accessible again
+    // ================================================================
+
+    // Restore kernel RSP
+    lea rax, [rip + port_u2k_kernel_rsp_restore]
+    mov rsp, [rax]
+
+    // Stack now has: [GDT desc 16 bytes][IDT desc 16 bytes][rcx][rdx][rax][ret addr]
+
+    // Restore kernel GDT
+    lgdt [rsp]
+    add rsp, 16
+
+    // Restore kernel IDT
+    lidt [rsp]
+    add rsp, 16
+
+    // Restore saved registers
+    pop rcx
+    pop rdx
+    pop rax
+
+    // Return to K2U's caller (the kernel code that invoked the trampoline)
+    ret
+
+// ================================================================
+// U2K Data Section (patched at runtime)
+// ================================================================
+.align 8
+.globl port_u2k_data_start
+port_u2k_data_start:
+
+.globl port_u2k_kernel_cr3_value
+port_u2k_kernel_cr3_value:
+    .quad 0
+
+.globl port_u2k_kernel_rsp_restore
+port_u2k_kernel_rsp_restore:
+    .quad 0
+
+.globl port_u2k_data_end
+port_u2k_data_end:
+
+.globl port_trampoline_u2k_end
+port_trampoline_u2k_end:
+"#
+);
+
+// ============================================================================
+// External Symbols from Assembly
+// ============================================================================
+
+extern "C" {
+    // K2U trampoline
+    static port_trampoline_k2u: u8;
+    static port_trampoline_k2u_end: u8;
+    static port_k2u_data_start: u8;
+    static port_k2u_data_end: u8;
+
+    // K2U data fields
+    static mut port_k2u_kernel_rsp_save: u64;
+    static mut port_k2u_user_cr3_value: u64;
+    static mut port_k2u_gdt_desc: [u8; 16];
+    static mut port_k2u_idt_desc: [u8; 16];
+    static mut port_k2u_tss_selector: u16;
+    static mut port_k2u_user_stack_top: u64;
+    static mut port_k2u_user_entry_point: u64;
+
+    // U2K trampoline
+    static port_trampoline_u2k: u8;
+    static port_trampoline_u2k_end: u8;
+    static port_u2k_data_start: u8;
+    static port_u2k_data_end: u8;
+
+    // U2K data fields
+    static mut port_u2k_kernel_cr3_value: u64;
+    static mut port_u2k_kernel_rsp_restore: u64;
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Get K2U trampoline code as byte slice
 pub fn get_k2u_code() -> &'static [u8] {
-    // Machine code for K2U trampoline (without debug prints)
-    // This would normally be generated by assembling the .S file
-    K2U_MACHINE_CODE
+    unsafe {
+        let start = &port_trampoline_k2u as *const u8;
+        let end = &port_trampoline_k2u_end as *const u8;
+        let size = end as usize - start as usize;
+        core::slice::from_raw_parts(start, size)
+    }
 }
 
-/// U2K trampoline machine code (position-independent)
-///
-/// This code:
-/// 1. Switches CR3 to kernel page tables
-/// 2. Restores kernel RSP from data section
-/// 3. Pops and restores kernel GDT/IDT from stack
-/// 4. Returns to caller
+/// Get U2K trampoline code as byte slice
 pub fn get_u2k_code() -> &'static [u8] {
-    U2K_MACHINE_CODE
+    unsafe {
+        let start = &port_trampoline_u2k as *const u8;
+        let end = &port_trampoline_u2k_end as *const u8;
+        let size = end as usize - start as usize;
+        core::slice::from_raw_parts(start, size)
+    }
+}
+
+/// Get size of K2U trampoline (code + data)
+pub fn k2u_size() -> usize {
+    get_k2u_code().len()
+}
+
+/// Get size of U2K trampoline (code + data)
+pub fn u2k_size() -> usize {
+    get_u2k_code().len()
+}
+
+/// Offset of data section in K2U trampoline
+pub fn k2u_data_offset() -> usize {
+    unsafe {
+        let code_start = &port_trampoline_k2u as *const u8 as usize;
+        let data_start = &port_k2u_data_start as *const u8 as usize;
+        data_start - code_start
+    }
+}
+
+/// Offset of data section in U2K trampoline
+pub fn u2k_data_offset() -> usize {
+    unsafe {
+        let code_start = &port_trampoline_u2k as *const u8 as usize;
+        let data_start = &port_u2k_data_start as *const u8 as usize;
+        data_start - code_start
+    }
 }
 
 // ============================================================================
-// Data Section Offsets
+// K2U Field Offsets (from start of K2U code)
 // ============================================================================
 
-/// Offsets within K2U trampoline data section (from start of trampoline code)
 pub mod k2u_offsets {
-    /// Offset to kernel_rsp_save field (8 bytes)
-    pub const KERNEL_RSP_SAVE: usize = K2U_DATA_START;
-    /// Offset to u2k_rsp_save_addr field (8 bytes) - address of kernel_rsp_restore in U2K
-    pub const U2K_RSP_SAVE_ADDR: usize = KERNEL_RSP_SAVE + 8;
-    /// Offset to user_cr3_value field (8 bytes)
-    pub const USER_CR3_VALUE: usize = U2K_RSP_SAVE_ADDR + 8;
-    /// Offset to gdt_desc field (10 bytes + 6 padding = 16 bytes)
-    pub const GDT_DESC: usize = USER_CR3_VALUE + 8;
-    /// Offset to idt_desc field (10 bytes + 6 padding = 16 bytes)
-    pub const IDT_DESC: usize = GDT_DESC + 16;
-    /// Offset to tss_selector field (8 bytes, selector in low 16 bits)
-    pub const TSS_SELECTOR: usize = IDT_DESC + 16;
-    /// Offset to user_stack_top field (8 bytes)
-    pub const USER_STACK_TOP: usize = TSS_SELECTOR + 8;
-    /// Offset to user_entry_point field (8 bytes)
-    pub const USER_ENTRY_POINT: usize = USER_STACK_TOP + 8;
-    
-    /// Total size of K2U data section
-    pub const DATA_SIZE: usize = USER_ENTRY_POINT + 8 - K2U_DATA_START;
-    
-    /// Start of data section (must be 8-byte aligned)
-    const K2U_DATA_START: usize = super::K2U_CODE_SIZE;
+    use super::*;
+
+    pub fn kernel_rsp_save() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_kernel_rsp_save as *const u64 as usize;
+            field - start
+        }
+    }
+
+    pub fn user_cr3_value() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_user_cr3_value as *const u64 as usize;
+            field - start
+        }
+    }
+
+    pub fn gdt_desc() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_gdt_desc as *const [u8; 16] as usize;
+            field - start
+        }
+    }
+
+    pub fn idt_desc() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_idt_desc as *const [u8; 16] as usize;
+            field - start
+        }
+    }
+
+    pub fn tss_selector() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_tss_selector as *const u16 as usize;
+            field - start
+        }
+    }
+
+    pub fn user_stack_top() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_user_stack_top as *const u64 as usize;
+            field - start
+        }
+    }
+
+    pub fn user_entry_point() -> usize {
+        unsafe {
+            let start = &port_trampoline_k2u as *const u8 as usize;
+            let field = &port_k2u_user_entry_point as *const u64 as usize;
+            field - start
+        }
+    }
 }
 
-/// Offsets within U2K trampoline data section
+// ============================================================================
+// U2K Field Offsets (from start of U2K code)
+// ============================================================================
+
 pub mod u2k_offsets {
-    /// Offset to kernel_cr3_value field (8 bytes)
-    pub const KERNEL_CR3_VALUE: usize = U2K_DATA_START;
-    /// Offset to kernel_rsp_restore field (8 bytes)
-    pub const KERNEL_RSP_RESTORE: usize = KERNEL_CR3_VALUE + 8;
-    
-    /// Total size of U2K data section
-    pub const DATA_SIZE: usize = KERNEL_RSP_RESTORE + 8 - U2K_DATA_START;
-    
-    /// Start of data section
-    const U2K_DATA_START: usize = super::U2K_CODE_SIZE;
+    use super::*;
+
+    pub fn kernel_cr3_value() -> usize {
+        unsafe {
+            let start = &port_trampoline_u2k as *const u8 as usize;
+            let field = &port_u2k_kernel_cr3_value as *const u64 as usize;
+            field - start
+        }
+    }
+
+    pub fn kernel_rsp_restore() -> usize {
+        unsafe {
+            let start = &port_trampoline_u2k as *const u8 as usize;
+            let field = &port_u2k_kernel_rsp_restore as *const u64 as usize;
+            field - start
+        }
+    }
 }
 
 // ============================================================================
-// Trampoline Size Constants
+// Setup Functions
 // ============================================================================
 
-/// Size of K2U trampoline code (before data section)
-pub const K2U_CODE_SIZE: usize = 512;  // Approximate, will be exact after assembly
-
-/// Size of U2K trampoline code (before data section)  
-pub const U2K_CODE_SIZE: usize = 256;  // Approximate, will be exact after assembly
-
-/// Total size of K2U trampoline (code + data)
-pub const K2U_TOTAL_SIZE: usize = 2048;
-
-/// Total size of U2K trampoline (code + data)
-pub const U2K_TOTAL_SIZE: usize = 2048;
-
-// ============================================================================
-// Machine Code
-// ============================================================================
-
-/// K2U trampoline machine code (stripped of debug output)
-/// 
-/// Register usage:
-/// - RAX: general purpose, CR3 value, addresses
-/// - RSP: stack pointer (switches from kernel to user)
-/// - Segment registers updated via LGDT/LIDT/LTR
-///
-/// Data section layout (all 8-byte aligned):
-/// - kernel_rsp_save: saved kernel RSP (for debugging)
-/// - u2k_rsp_save_addr: pointer to U2K's kernel_rsp_restore
-/// - user_cr3_value: CR3 value for user page tables
-/// - gdt_desc: 10-byte GDT descriptor + 6 bytes padding
-/// - idt_desc: 10-byte IDT descriptor + 6 bytes padding  
-/// - tss_selector: TSS selector (low 16 bits)
-/// - user_stack_top: user stack pointer
-/// - user_entry_point: user code entry point
-static K2U_MACHINE_CODE: &[u8] = &[
-    // === Save kernel state ===
-    // push rax; push rdx
-    0x50, 0x52,
-    
-    // sub rsp, 16; sidt [rsp]  -- Save kernel IDT
-    0x48, 0x83, 0xEC, 0x10,
-    0x0F, 0x01, 0x0C, 0x24,
-    
-    // sub rsp, 16; sgdt [rsp]  -- Save kernel GDT
-    0x48, 0x83, 0xEC, 0x10,
-    0x0F, 0x01, 0x04, 0x24,
-    
-    // === Save kernel RSP to U2K data section ===
-    // lea rax, [rip + u2k_rsp_save_addr]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // mov rax, [rax]
-    0x48, 0x8B, 0x00,
-    // mov [rax], rsp
-    0x48, 0x89, 0x20,
-    
-    // === Switch to user CR3 ===
-    // lea rax, [rip + user_cr3_value]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // mov rax, [rax]
-    0x48, 0x8B, 0x00,
-    // mov cr3, rax
-    0x0F, 0x22, 0xD8,
-    
-    // === Load user GDT ===
-    // lea rax, [rip + gdt_desc]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // lgdt [rax]
-    0x0F, 0x01, 0x10,
-    
-    // === Switch to user stack ===
-    // lea rax, [rip + user_stack_top]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // mov rsp, [rax]
-    0x48, 0x8B, 0x20,
-    
-    // === Load user IDT ===
-    // lea rax, [rip + idt_desc]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // lidt [rax]
-    0x0F, 0x01, 0x18,
-    
-    // === Load TSS ===
-    // lea rax, [rip + tss_selector]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // movzx eax, word ptr [rax]
-    0x0F, 0xB7, 0x00,
-    // ltr ax
-    0x0F, 0x00, 0xD8,
-    
-    // === Build IRETQ frame for Ring 3 transition ===
-    // push 0x23  -- SS (user data, RPL=3)
-    0x6A, 0x23,
-    
-    // lea rax, [rip + user_stack_top]; mov rax, [rax]; push rax  -- RSP
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    0x48, 0x8B, 0x00,
-    0x50,
-    
-    // pushfq; pop rax; or rax, 0x200; push rax  -- RFLAGS with IF=1
-    0x9C,
-    0x58,
-    0x48, 0x0D, 0x00, 0x02, 0x00, 0x00,
-    0x50,
-    
-    // push 0x1B  -- CS (user code, RPL=3)
-    0x6A, 0x1B,
-    
-    // lea rax, [rip + user_entry_point]; mov rax, [rax]; push rax  -- RIP
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    0x48, 0x8B, 0x00,
-    0x50,
-    
-    // iretq  -- Transition to Ring 3!
-    0x48, 0xCF,
-];
-
-/// U2K trampoline machine code (stripped of debug output)
-static U2K_MACHINE_CODE: &[u8] = &[
-    // === Switch to kernel CR3 ===
-    // lea rax, [rip + kernel_cr3_value]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // mov rax, [rax]
-    0x48, 0x8B, 0x00,
-    // mov cr3, rax
-    0x0F, 0x22, 0xD8,
-    
-    // === Restore kernel RSP ===
-    // lea rax, [rip + kernel_rsp_restore]
-    0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,  // offset filled at patch time
-    // mov rsp, [rax]
-    0x48, 0x8B, 0x20,
-    
-    // === Restore kernel GDT ===
-    // lgdt [rsp]
-    0x0F, 0x01, 0x14, 0x24,
-    // add rsp, 16
-    0x48, 0x83, 0xC4, 0x10,
-    
-    // === Restore kernel IDT ===
-    // lidt [rsp]
-    0x0F, 0x01, 0x1C, 0x24,
-    // add rsp, 16
-    0x48, 0x83, 0xC4, 0x10,
-    
-    // === Restore saved registers ===
-    // pop rdx; pop rax
-    0x5A, 0x58,
-    
-    // ret  -- Return to kernel caller
-    0xC3,
-];
-
-// ============================================================================
-// Trampoline Setup
-// ============================================================================
-
-/// Copy trampolines to guest memory and patch data section offsets
+/// Copy trampolines to guest memory and return entry addresses
 ///
 /// # Arguments
 /// * `storage` - Guest memory buffer
 /// * `k2u_offset` - Offset in storage for K2U trampoline
-/// * `u2k_offset` - Offset in storage for U2K trampoline (usually k2u_offset + K2U_TOTAL_SIZE)
-/// * `trampoline_va` - Virtual address where trampolines are mapped
+/// * `u2k_offset` - Offset in storage for U2K trampoline
 ///
 /// # Returns
-/// Tuple of (k2u_entry_va, u2k_entry_va)
-pub fn setup_trampolines(
+/// (k2u_entry_offset, u2k_entry_offset) - Offsets of entry points in storage
+pub fn copy_trampolines(
     storage: &mut [u8],
     k2u_offset: usize,
     u2k_offset: usize,
-    trampoline_va: u64,
-) -> UnikraftResult<(u64, u64)> {
-    // Copy K2U trampoline code
+) -> (usize, usize) {
     let k2u_code = get_k2u_code();
-    if k2u_offset + K2U_TOTAL_SIZE > storage.len() {
-        return Err(UnikraftError::TrampolineError);
-    }
-    storage[k2u_offset..k2u_offset + k2u_code.len()].copy_from_slice(k2u_code);
-    // Zero the rest of K2U region (data section will be filled later)
-    storage[k2u_offset + k2u_code.len()..k2u_offset + K2U_TOTAL_SIZE].fill(0);
-    
-    // Copy U2K trampoline code
     let u2k_code = get_u2k_code();
-    if u2k_offset + U2K_TOTAL_SIZE > storage.len() {
-        return Err(UnikraftError::TrampolineError);
-    }
+
+    storage[k2u_offset..k2u_offset + k2u_code.len()].copy_from_slice(k2u_code);
     storage[u2k_offset..u2k_offset + u2k_code.len()].copy_from_slice(u2k_code);
-    // Zero the rest of U2K region
-    storage[u2k_offset + u2k_code.len()..u2k_offset + U2K_TOTAL_SIZE].fill(0);
-    
-    // Calculate entry point VAs
-    let k2u_entry_va = trampoline_va;
-    let u2k_entry_va = trampoline_va + K2U_TOTAL_SIZE as u64;
-    
-    Ok((k2u_entry_va, u2k_entry_va))
+
+    // Entry points are at the start of each trampoline
+    (k2u_offset, u2k_offset)
 }
 
 /// Patch K2U trampoline data section
@@ -312,15 +475,14 @@ pub fn setup_trampolines(
 /// * `storage` - Guest memory buffer
 /// * `k2u_offset` - Offset of K2U trampoline in storage
 /// * `user_cr3` - Physical address of user PML4
-/// * `gdt_base` - Physical address of user GDT
+/// * `gdt_base` - Virtual address of GDT
 /// * `gdt_limit` - GDT limit (size - 1)
-/// * `idt_base` - Physical address of user IDT
+/// * `idt_base` - Virtual address of IDT
 /// * `idt_limit` - IDT limit (size - 1)
-/// * `tss_selector` - TSS segment selector
-/// * `user_stack_top` - User stack top address
+/// * `tss_selector` - TSS selector (typically 0x28)
+/// * `user_stack_top` - User stack pointer
 /// * `user_entry_point` - User code entry point
-/// * `u2k_rsp_restore_addr` - Address of kernel_rsp_restore in U2K trampoline
-pub fn patch_k2u_data(
+pub fn patch_k2u(
     storage: &mut [u8],
     k2u_offset: usize,
     user_cr3: u64,
@@ -331,41 +493,34 @@ pub fn patch_k2u_data(
     tss_selector: u16,
     user_stack_top: u64,
     user_entry_point: u64,
-    u2k_rsp_restore_addr: u64,
 ) {
-    let data_base = k2u_offset + K2U_CODE_SIZE;
-    
-    // kernel_rsp_save - left as 0, filled at runtime
-    
-    // u2k_rsp_save_addr
-    let offset = data_base + (k2u_offsets::U2K_RSP_SAVE_ADDR - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 8].copy_from_slice(&u2k_rsp_restore_addr.to_le_bytes());
-    
-    // user_cr3_value
-    let offset = data_base + (k2u_offsets::USER_CR3_VALUE - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 8].copy_from_slice(&user_cr3.to_le_bytes());
-    
-    // gdt_desc (10 bytes: limit + base)
-    let offset = data_base + (k2u_offsets::GDT_DESC - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 2].copy_from_slice(&gdt_limit.to_le_bytes());
-    storage[offset + 2..offset + 10].copy_from_slice(&gdt_base.to_le_bytes());
-    
-    // idt_desc (10 bytes: limit + base)
-    let offset = data_base + (k2u_offsets::IDT_DESC - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 2].copy_from_slice(&idt_limit.to_le_bytes());
-    storage[offset + 2..offset + 10].copy_from_slice(&idt_base.to_le_bytes());
-    
-    // tss_selector (in low 16 bits of 8-byte field)
-    let offset = data_base + (k2u_offsets::TSS_SELECTOR - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 2].copy_from_slice(&tss_selector.to_le_bytes());
-    
-    // user_stack_top
-    let offset = data_base + (k2u_offsets::USER_STACK_TOP - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 8].copy_from_slice(&user_stack_top.to_le_bytes());
-    
-    // user_entry_point
-    let offset = data_base + (k2u_offsets::USER_ENTRY_POINT - k2u_offsets::KERNEL_RSP_SAVE);
-    storage[offset..offset + 8].copy_from_slice(&user_entry_point.to_le_bytes());
+    let data_base = k2u_offset + k2u_data_offset();
+
+    // user_cr3_value is at offset 8 from data_start (after kernel_rsp_save)
+    let cr3_offset = data_base + 8;
+    storage[cr3_offset..cr3_offset + 8].copy_from_slice(&user_cr3.to_le_bytes());
+
+    // gdt_desc at offset 16
+    let gdt_offset = data_base + 16;
+    storage[gdt_offset..gdt_offset + 2].copy_from_slice(&gdt_limit.to_le_bytes());
+    storage[gdt_offset + 2..gdt_offset + 10].copy_from_slice(&gdt_base.to_le_bytes());
+
+    // idt_desc at offset 32
+    let idt_offset = data_base + 32;
+    storage[idt_offset..idt_offset + 2].copy_from_slice(&idt_limit.to_le_bytes());
+    storage[idt_offset + 2..idt_offset + 10].copy_from_slice(&idt_base.to_le_bytes());
+
+    // tss_selector at offset 48
+    let tss_offset = data_base + 48;
+    storage[tss_offset..tss_offset + 2].copy_from_slice(&tss_selector.to_le_bytes());
+
+    // user_stack_top at offset 56
+    let stack_offset = data_base + 56;
+    storage[stack_offset..stack_offset + 8].copy_from_slice(&user_stack_top.to_le_bytes());
+
+    // user_entry_point at offset 64
+    let entry_offset = data_base + 64;
+    storage[entry_offset..entry_offset + 8].copy_from_slice(&user_entry_point.to_le_bytes());
 }
 
 /// Patch U2K trampoline data section
@@ -374,21 +529,11 @@ pub fn patch_k2u_data(
 /// * `storage` - Guest memory buffer
 /// * `u2k_offset` - Offset of U2K trampoline in storage
 /// * `kernel_cr3` - Physical address of kernel PML4
-pub fn patch_u2k_data(
-    storage: &mut [u8],
-    u2k_offset: usize,
-    kernel_cr3: u64,
-) {
-    let data_base = u2k_offset + U2K_CODE_SIZE;
-    
-    // kernel_cr3_value
-    storage[data_base..data_base + 8].copy_from_slice(&kernel_cr3.to_le_bytes());
-    
-    // kernel_rsp_restore - left as 0, filled by K2U at runtime
-}
+pub fn patch_u2k(storage: &mut [u8], u2k_offset: usize, kernel_cr3: u64) {
+    let data_base = u2k_offset + u2k_data_offset();
 
-/// Get the offset of kernel_rsp_restore within U2K trampoline
-/// This address is written to K2U's u2k_rsp_save_addr field
-pub fn get_u2k_kernel_rsp_restore_offset() -> usize {
-    U2K_CODE_SIZE + (u2k_offsets::KERNEL_RSP_RESTORE - u2k_offsets::KERNEL_CR3_VALUE)
+    // kernel_cr3_value at offset 0
+    storage[data_base..data_base + 8].copy_from_slice(&kernel_cr3.to_le_bytes());
+
+    // kernel_rsp_restore is filled by K2U at runtime
 }
