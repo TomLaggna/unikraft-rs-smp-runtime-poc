@@ -14,6 +14,7 @@
 mod cpu_startup;
 mod dandelion_commons;
 mod elfloader;
+mod timing;
 mod trampolines;
 mod user_code;
 mod user_handlers;
@@ -40,6 +41,7 @@ use core::ptr;
 use cpu_startup::*;
 use elfloader::elf_parser::ParsedElf;
 use std::fs;
+use timing::{init_timer, record_and_print, TimePoint};
 use user_pagetable::{virt_to_phys, walk_pt, walk_pt_with_flags};
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
@@ -211,6 +213,9 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
 }
 
 fn main() {
+    // Initialize timing as first thing
+    init_timer();
+
     // Initialize serial console for debugging (for custom output)
     // Note: On Unikraft with std, regular println! should work
     println!("Rust Multicore Boot Starting...");
@@ -1014,6 +1019,10 @@ fn main() {
 
     let task_info_ptr = unsafe { &raw const AP_TASK_INFO as *const ApTaskInfo as u64 };
     println!("✓ AP task info at: 0x{:x}", task_info_ptr);
+    println!();
+
+    // Record timestamp: User space memory setup complete
+    record_and_print(TimePoint::UserSpaceSetupComplete);
     println!();
 
     // Step 3: Get number of CPUs from ACPI (simplified - assumes 2 CPUs)

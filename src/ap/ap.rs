@@ -2,6 +2,7 @@
 use crate::ap_println; // Macro is exported to crate root
 use crate::boot_trampoline_bindings;
 use crate::cpu_startup::x2apic_enable;
+use crate::timing::{record_and_print_ap, TimePoint};
 use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
@@ -72,6 +73,9 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         setup_exception_handlers();
         ap_println!("Exception handlers installed");
 
+        // Record timestamp: AP boot complete
+        record_and_print_ap(TimePoint::ApBootComplete);
+
         // Read task info from shared memory
         let task_info_ptr = cpu.task_info_ptr as *const ApTaskInfo;
         if task_info_ptr.is_null() {
@@ -113,6 +117,9 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         task_info.write_status(1);
         ap_println!("Task status set to RUNNING");
         ap_println!();
+
+        // Record timestamp: Before user execution
+        record_and_print_ap(TimePoint::BeforeUserExecution);
 
         // Execute user code via K->U trampoline
         // NOTE: GDT/IDT/TSS are NOT loaded here - the trampoline will load them
@@ -254,6 +261,10 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         ap_println!("==========================================================");
         ap_println!("✓ SUCCESS! Returned from user space!");
         ap_println!("==========================================================");
+
+        // Record timestamp: After user execution
+        record_and_print_ap(TimePoint::AfterUserExecution);
+
         ap_println!("What just happened:");
         ap_println!("  1. K->U trampoline switched to user CR3");
         ap_println!(
