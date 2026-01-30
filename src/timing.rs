@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Global start time (initialized when first timer is created)
 static START_TIME: AtomicU64 = AtomicU64::new(0);
+const CPU_MHZ: u64 = 2100; // Assume 2.1 GHz for conversion (adjust as needed)
 
 /// Record points for timing
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,7 +65,7 @@ pub fn record_and_print(point: TimePoint) {
 
     // Convert cycles to microseconds (assuming 2.1 GHz CPU)
     // This is approximate - actual TSC frequency varies by CPU
-    let micros = cycles / 2100;
+    let micros = cycles / CPU_MHZ;
 
     println!(
         "[TIMESTAMP] {} at {} cycles ({} μs)",
