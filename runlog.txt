@@ -3,17 +3,32 @@ Building Rust application...
 cargo build --release --target x86_64-unknown-linux-musl
 ✓ Rust build complete: target/x86_64-unknown-linux-musl/release/smp-poc
 Starting buildkitd container...
-buildkitd
 ✓ buildkitd running. Exported: KRAFTKIT_BUILDKIT_HOST=docker-container://buildkitd
 Building initramfs with kraft...
 KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
- i  building rootfs via Dockerfile (x86_64)
+A new version of KraftKit is now available (v0.12.5)!
+
+Please update KraftKit through your local package manager or run:
+
+curl --proto '=https' --tlsv1.2 -sSf https://get.kraftkit.sh | sh
+
+Read the full changelog:
+
+https://github.com/unikraft/kraftkit/releases/tag/v0.12.5
+
+To turn off this check, set:
+
+export KRAFTKIT_NO_CHECK_UPDATES=true
+
+Or use the globally accessible flag '--no-check-updates'.
+
+		 i  building rootfs via Dockerfile (x86_64)
  i  #1 [internal] load build definition from Dockerfile
  i  #1 transferring dockerfile: 1.05kB done
  i  #1 DONE 0.0s
  i  
  i  #2 [internal] load metadata for docker.io/library/rust:1.91-bookworm
- i  #2 DONE 1.0s
+ i  #2 DONE 0.2s
  i  
  i  #3 [internal] load .dockerignore
  i  #3 transferring context: 2B done
@@ -24,80 +39,80 @@ KRAFT_LOG_LEVEL=trace kraft build --plat qemu --arch x86_64
  i  #4 DONE 0.0s
  i  
  i  #5 [internal] load build context
- i  #5 transferring context: 1.18kB done
+ i  #5 transferring context: 1.25kB done
  i  #5 DONE 0.0s
  i  
  i  #6 [stage-1 1/5] COPY --from=build /target/x86_64-unknown-linux-musl/release/smp-poc /smp-poc
  i  #6 CACHED
  i  
- i  #7 [stage-1 4/5] COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+ i  #7 [build  7/12] COPY ./Makefile ./Makefile
  i  #7 CACHED
  i  
- i  #8 [stage-1 3/5] COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
+ i  #8 [stage-1 4/5] COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
  i  #8 CACHED
  i  
- i  #9 [build 12/12] RUN cargo build --release --target x86_64-unknown-linux-musl --bin smp-poc
+ i  #9 [stage-1 3/5] COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
  i  #9 CACHED
  i  
- i  #10 [build  3/12] COPY ./.cargo ./.cargo
+ i  #10 [build 10/12] RUN rustup target add x86_64-unknown-linux-musl
  i  #10 CACHED
  i  
- i  #11 [build  4/12] COPY ./src ./src
+ i  #11 [build  8/12] COPY ./tls_linker.ld ./tls_linker.ld
  i  #11 CACHED
  i  
- i  #12 [build  7/12] COPY ./Makefile ./Makefile
+ i  #12 [build 12/12] RUN cargo build --release --target x86_64-unknown-linux-musl --bin smp-poc
  i  #12 CACHED
  i  
- i  #13 [build  9/12] COPY ./elf ./elf
+ i  #13 [build  3/12] COPY ./.cargo ./.cargo
  i  #13 CACHED
  i  
- i  #14 [build  5/12] COPY ./Cargo.toml ./Cargo.toml
+ i  #14 [build  4/12] COPY ./src ./src
  i  #14 CACHED
  i  
- i  #15 [build  6/12] COPY ./Cargo.lock ./Cargo.lock
+ i  #15 [build  2/12] RUN apt-get update && apt-get install -y     gcc     make     binutils     && rm -rf /var/lib/apt/lists/*
  i  #15 CACHED
  i  
- i  #16 [build  2/12] RUN apt-get update && apt-get install -y     gcc     make     binutils     && rm -rf /var/lib/apt/lists/*
+ i  #16 [build  9/12] COPY ./elf ./elf
  i  #16 CACHED
  i  
  i  #17 [build 11/12] RUN make asm
  i  #17 CACHED
  i  
- i  #18 [build  8/12] COPY ./tls_linker.ld ./tls_linker.ld
+ i  #18 [build  5/12] COPY ./Cargo.toml ./Cargo.toml
  i  #18 CACHED
  i  
- i  #19 [build 10/12] RUN rustup target add x86_64-unknown-linux-musl
+ i  #19 [stage-1 2/5] COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
  i  #19 CACHED
  i  
- i  #20 [stage-1 2/5] COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
+ i  #20 [build  6/12] COPY ./Cargo.lock ./Cargo.lock
  i  #20 CACHED
  i  
  i  #21 [stage-1 5/5] COPY --from=build /elf /elf
  i  #21 CACHED
  i  
  i  #22 exporting to oci image format
- i  #22 exporting layers 0.1s done
- i  #22 exporting manifest sha256:bdb0db10d5a7912d5e199af3ae89d55b2e99dc2b91d75dd85eb09cb5af2c9918 0.0s done
- i  #22 exporting config sha256:95c6e42394538e6ef37370fafe00fab71f2b28fc2b71d65cc7ee240ba9a90983 0.0s done
+ i  #22 exporting layers done
+ i  #22 exporting manifest sha256:4f89f1a9165937c16ca9b6ad4ae368ab813f5e635fdfc78d867abaccd6ce8c5f done
+ i  #22 exporting config sha256:734a02553d411b71fef73f349ff9dadb39039d51fac621d3e2ea3ea1f7f79862 done
  i  #22 sending tarball 0.0s done
- i  #22 DONE 0.1s
+ i  #22 DONE 0.0s
  i  
  i  #23 exporting to client tarball
  i  #23 sending tarball 0.0s done
- i  #23 DONE 0.1s
+ i  #23 DONE 0.0s
  i  
  i  #24 exporting cache to client directory
  i  #24 preparing build cache for export
- i  #24 writing layer sha256:2c09db0c9daec368869a19c751ee18b0614a32fc827734edf200d27ffc63edec
- i  #24 preparing build cache for export 0.9s done
- i  #24 writing layer sha256:2c09db0c9daec368869a19c751ee18b0614a32fc827734edf200d27ffc63edec done
- i  #24 writing layer sha256:a89428e56cc0740f778efa245aae56fef7c8bfc733c31c073e29a33556b058ca done
- i  #24 writing layer sha256:aacb9e7a9dfdf806ff68146fafdb9807a8710e84eeea722a22b8029a31d00072 done
- i  #24 writing layer sha256:b9e1e75651404f7a66fbdb9ecb78e656f28eab98bc5a6713fba42f203c46854d done
+ i  #24 writing layer sha256:09ccc3287c4f04f810d72596774bc6088a73d2b43a403c93be31063c9913f4c4
+ i  #24 preparing build cache for export 0.1s done
+ i  #24 writing layer sha256:09ccc3287c4f04f810d72596774bc6088a73d2b43a403c93be31063c9913f4c4 done
+ i  #24 writing layer sha256:2907fcce11b1bf382159f63e375fe673cb576a587bf004e55d0270001d9fe527 done
+ i  #24 writing layer sha256:57f970ffb6b98e5404aa3ff7f936d15e37a38896c1c87dc5fa1b7c75aab6d927 done
+ i  #24 writing layer sha256:9cc44e204145f13372d78e045b16f983a0e9ad0a6880f567745ffbbb58f3ce32 done
  i  #24 writing layer sha256:e19dbe96b150fa8675d7fe836d15b4a047e5e55735d2db7e0f722a2386cf8024 done
- i  #24 writing config sha256:202cf5fb65a8b0fa136d78b410530ca99540c619e3cc5ebafc99bb754d3ba7b7 0.0s done
- i  #24 writing cache image manifest sha256:2ec0560dee36d10de9893901de9a9bbec4221bf070050b0a249eeb00972ce6da 0.0s done
- i  #24 DONE 0.9s
+ i  #24 writing config sha256:27dc2f9955fc2993a94d8cdc1a195b43b46b214f7959e4ad51e0e7aa098e7923 done
+ i  #24 writing cache image manifest sha256:e8f6128164a3da02e1d00704d3145f0bca031a2a05777cee97ff94d0c663a8b9 done
+ i  #24 DONE 0.1s
  i  build completed successfully initramfs=Dockerfile
 ✓ Initramfs created: .unikraft/build/initramfs-x86_64.cpio
 Starting QEMU with 4 CPUs and Unikraft kernel...
@@ -110,387 +125,21 @@ Press Ctrl-B to configure iPXE (PCI 00:03.0)...
 
 
 Booting from ROM..Powered by Unikraft Kiviuq (0.20.0~5a22d73)
-Rust Multicore Boot Starting...
-CR4 value at startup: 0x0000000000050620
-  SMEP: disabled
-  SMAP: disabled
-BSP running from: main() at 0x10001d7c80
-AP entry point: ap_entry() at 0x10001e06c0
-
-=== TEST: Trampoline Allocation and High Address Mapping ===
-Step 1: Allocated 12288 bytes (3 pages)
-  Buffer VA: 0x000000100012e030
-  CR3: 0x0000000000012000
-  Page-aligned addresses found:
-    Page 1 VA: 0x000000100012f000
-    Page 2 VA: 0x0000001000130000
-  Physical addresses (from page table walk):
-    Page 1 PA: 0x0000000000a2c000
-    Page 2 PA: 0x000000000090f000
-
-Step 2: Mapping at high addresses (~2TB, below VMA region)
-  High VA page 1: 0x00001fffffffe000 -> PA: 0x0000000000a2c000
-  High VA page 2: 0x00001ffffffff000 -> PA: 0x000000000090f000
-  ✓ Pages mapped successfully
-  ✓ TLB flushed
-=== TEST COMPLETE ===
-
-x2APIC enabled on BSP
-
-=== Loading ELF file ===
-✓ Read ELF file: 23328 bytes
-✓ ELF parsed successfully
-✓ ELF entry point: 0x11630
-
-=== Testing User Space Manager (Dandelion Pattern) ===
-  Raw allocation at 0x000000100024c090, alignment offset: 0xf70
-  guest_mem at KVA 0x000000100024d000 (page-aligned ✓)
-  Forcing kernel to map 16384 pages...
-  All pages now mapped in kernel page tables ✓
-  guest_mem at PA  0x0000000000a37000 (page-aligned ✓)
-
-=== BUFFER LAYOUT (64MB total) ===
-  Buffer size: 67108864 bytes (0x4000000)
-  Memory regions:
-    [0x0 - 0x3df4000] User space (61.95 MB) ✓ PAGE-ALIGNED
-    [0x3df4000 - 0x3dfa000] Interrupt structures (24576 bytes)
-      Handler code:  0x3df4000 (4096 bytes)
-      GDT:           0x3df5d38 (80 bytes)
-      TSS:           0x3df5d88 (104 bytes)
-      IDT:           0x3df5df0 (528 bytes)
-      Int stack:     0x3df6000 (16384 bytes)
-    [0x3dfa000 - 0x3dfd000] Trampoline page tables (3 pages)
-      Tramp P3:      0x3dfa000
-      Tramp P2:      0x3dfb000
-      Tramp P1:      0x3dfc000
-    [0x3dfd000 - 0x4000000] Main page tables (2109440 bytes)
-      P2+P1:         0x3dfd000
-      P3:            0x3ffe000
-      P4:            0x3fff000
-
-  P4 setup:
-    p4_offset in guest_mem: 0x3fff000
-    p4_kva: 0x000000100424c000
-    p4_pa:  0x00000000031d5000 (validated page-aligned ✓)
-
-=== User Space Manager Summary ===
-  Virtual address space:  0x0 - 0x4000000 (64 MB)
-  Buffer size:            67112960 bytes (64 MB)
-  PML4 (CR3):             0x00000000031d5000
-
-  Memory layout:
-    User space:           0x0 - 0x3df4000 (61.95 MB)
-    Interrupt structures: 0x3df4000 - 0x3dfd000
-      Handler code:       0x3df4000
-      GDT:                0x3df5d38
-      TSS:                0x3df5d88
-      IDT:                0x3df5df0
-      Int stack:          0x3df6000 (top: 0x3dfa000)
-    Page tables:          0x3dfd000 - 0x4000000
-
-  User code size: 14 bytes
-  User code:
-    1. Print 'U' to UART (shows we're in user space)
-    2. Trigger INT 32 (calls U->K trampoline)
-    3. Should never reach loop
-
-=== map_user_range ===
-  Mapping: user VA 0x400000 - 0x410000
-  From:    kernel VA 0x10001430a0
-  Size:    0x10000 (64 KB)
-  Writable: false
-  Kernel-accessible (no U bit): false
-  table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
-  ✓ set_range completed
-
-  Verifying mappings...
-  ✓ First page VA 0x400000 -> PA 0x31d6000
-  ✓ Last page VA 0x40f000 -> PA 0x31e6000 (W=0 U=1)
-  ✓ All pages verified!
-✓ Mapped user code region:
-  User virtual:   0x400000 - 0x410000
-  Kernel virtual: 0x10001430a0 - 0x10001530a0
-
-
-=== map_user_range ===
-  Mapping: user VA 0x3de4000 - 0x3df4000
-  From:    kernel VA 0x10001540b0
-  Size:    0x10000 (64 KB)
-  Writable: true
-  Kernel-accessible (no U bit): false
-  table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
-  ✓ set_range completed
-
-  Verifying mappings...
-  ✓ First page VA 0x3de4000 -> PA 0x31e7000
-  ✓ Last page VA 0x3df3000 -> PA 0x31f7000 (W=1 U=1)
-  Checking stack-like mapping: will verify first push address 0x3df3ff8
-  ✓ First push address 0x3df3ff8 -> PA 0x31f7000
-    PTE flags: P=1 W=1 U=1
-  ✓ All pages verified!
-✓ User space ready! CR3 = 0x00000000031d5000
-
-=== Mapping Trampolines in User Page Tables ===
-
-=== Mapping Trampolines in User Page Tables ===
-  VA base:  0x00001fffffffe000
-  PA page1: 0x0000000000a2c000
-  PA page2: 0x000000000090f000
-  Indices: PML4[63] -> PDPT[511] -> PD[511] -> PT[510]
-  Trampoline page table physical addresses (pre-validated):
-    P3 PA: 0x0000000002fd0000
-    P2 PA: 0x0000000002fd1000
-    P1 PA: 0x0000000002fd2000
-  Set P4[63] = 0x0000000002fd0003
-  DEBUG: Read back from guest_mem[0x3fff1f8] = 0x0000000002fd0003
-  DEBUG: guest_mem[0x3fff1f8] KVA: 0x000000100424c1f8
-  DEBUG: Maps to PA: 0x00000000031d5000 + 0x1f8 = 0x00000000031d51f8
-  DEBUG: CR3 expects P4[63] at: 0x00000000031d5000 + 0x1f8 = 0x00000000031d51f8
-  Set P3[511] = 0x0000000002fd1007
-  DEBUG: Read back from guest_mem[0x3dfaff8] = 0x0000000002fd1007
-  Set P2[511] = 0x0000000002fd2007
-  DEBUG: Read back from guest_mem[0x3dfbff8] = 0x0000000002fd2007
-  Set P1[510] = 0x0000000000a2c003 (trampoline page 1)
-  Set P1[511] = 0x000000000090f003 (trampoline page 2)
-  DEBUG: Read back P1[510] from guest_mem[0x3dfcff0] = 0x0000000000a2c003
-  DEBUG: Read back P1[511] from guest_mem[0x3dfcff8] = 0x000000000090f003
-✓ Trampolines mapped in user page tables
-
-=== Verifying User Page Table Trampoline Mappings ===
-User CR3: 0x00000000031d5000
-User CR3 (physical): 0x00000000031d5000
-  Kernel CR3 (PA): 0x0000000000012000
-  User CR3 (PA):   0x00000000031d5000
-
-  User space layout:
-    Entry point: 0x0000000000400000
-    Stack top:   0x0000000003df4000
-
-  Setting up Kernel->User trampoline at 0x00001fffffffe000:
-    Trampoline code size: 504 bytes
-    ✓ Code copied
-
-  Setting up User->Kernel trampoline at 0x00001ffffffff000:
-    Trampoline code size: 72 bytes
-    ✓ Code copied
-
-  Trampolines copied, will patch data sections after interrupt setup
-
-=== Setting up user space interrupt handlers ===
-Handler code size: 439 bytes
-Original handler base: 0x00000010001d5500
-Kernel stack (for TSS.RSP0): 0x00000010001283c0
-
-=== Setting up interrupt infrastructure ===
-✓ Installed 439 bytes of handler code at buffer offset 0x3df4000
-✓ Handler addresses adjusted for guest_mem
-Setting up GDT at 0x3df5d38
-✓ GDT configured (80 bytes)
-Setting up TSS at 0x3df5d88, RSP0=0x10001283c0
-✓ TSS configured, descriptor updated in GDT
-Setting up IDT at 0x3df5df0
-✓ IDT configured (33 entries)
-
-=== Mapping Interrupt Infrastructure ===
-  Guest Mem Base KVA: 0x100024d000
-  Mapping handler code: 0x3df4000 - 0x3df5000 (EXECUTABLE/READ/KERNEL)
-
-=== map_user_range ===
-  Mapping: user VA 0x3df4000 - 0x3df5000
-  From:    kernel VA 0x1004041000
-  Size:    0x1000 (4 KB)
-  Writable: false
-  Kernel-accessible (no U bit): true
-  table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
-  ✓ set_range completed
-
-  Verifying mappings...
-  ✓ First page VA 0x3df4000 -> PA 0x2fca000
-  ✓ Last page VA 0x3df4000 -> PA 0x2fca000 (W=0 U=0)
-  ✓ All pages verified!
-  Mapping GDT/TSS/IDT: 0x3df5000 - 0x3df6000 (READ/WRITE/KERNEL)
-
-=== map_user_range ===
-  Mapping: user VA 0x3df5000 - 0x3df6000
-  From:    kernel VA 0x1004042000
-  Size:    0x1000 (4 KB)
-  Writable: true
-  Kernel-accessible (no U bit): true
-  table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
-  ✓ set_range completed
-
-  Verifying mappings...
-  ✓ First page VA 0x3df5000 -> PA 0x2fcb000
-  ✓ Last page VA 0x3df5000 -> PA 0x2fcb000 (W=1 U=0)
-  Checking stack-like mapping: will verify first push address 0x3df5ff8
-  ✓ First push address 0x3df5ff8 -> PA 0x2fcb000
-    PTE flags: P=1 W=1 U=0
-  ✓ All pages verified!
-  Mapping Interrupt Stack: 0x3df6000 - 0x3dfd000 (READ/WRITE/KERNEL)
-
-=== map_user_range ===
-  Mapping: user VA 0x3df6000 - 0x3dfd000
-  From:    kernel VA 0x1004043000
-  Size:    0x7000 (28 KB)
-  Writable: true
-  Kernel-accessible (no U bit): true
-  table_base offset: 0x3dfd000
-  table_base KVA: 0x100404a000
-  ✓ set_range completed
-
-  Verifying mappings...
-  ✓ First page VA 0x3df6000 -> PA 0x2fcc000
-  ✓ Last page VA 0x3dfc000 -> PA 0x2fd2000 (W=1 U=0)
-  Checking stack-like mapping: will verify first push address 0x3dfcff8
-  ✓ First push address 0x3dfcff8 -> PA 0x2fd2000
-    PTE flags: P=1 W=1 U=0
-  ✓ All pages verified!
-✓ Interrupt infrastructure mapped (via map_user_range)
-=== Interrupt infrastructure ready ===
-
-
-  VERIFY: Walking page tables for GDT UVA 0x3df5d38...
-    ✓ GDT UVA 0x3df5d38 -> PA 0x2fcbd38 Flags=0x2fcb003
-  VERIFY: Walking page tables for TSS UVA 0x3df5d88...
-    ✓ TSS UVA 0x3df5d88 -> PA 0x2fcbd88 Flags=0x2fcb003
-
-Patching User->Kernel trampoline address into INT 32 handler...
-  Trampoline field offset in handler code: 0x1ad
-  Handler code starts at: 0x3df4000
-  Trampoline field at: 0x3df41ad
-  Patching with U->K trampoline VA: 0x00001ffffffff000
-  Verification: read back 0x00001ffffffff000
-  ✓ Trampoline address patched successfully!
-
-Patching trampoline data sections...
-
-  K->U trampoline data:
-    Computing address: 0x00001fffffffe000 + 0x1b8 = 0x00001fffffffe1b8
-    user_cr3 = 0x00000000031d5000 (offset 0x1b8)
-    CRITICAL: user_stack_top offset = 0x1e8 (488)
-    Writing to address: 0x00001fffffffe1e8
-    user_rsp = 0x0000000003df4000 (offset 0x1e8)
-    Verification: read back 0x0000000003df4000
-    DEBUG: LEA will compute address: 0x00001fffffffe1e8
-    DEBUG: Reading from LEA address via kernel PT: 0x0000000003df4000
-    DEBUG: Kernel PT maps data address 0x00001fffffffe1e8 -> PA 0x0000000000a2c1e8
-    DEBUG: User PT maps data address   0x00001fffffffe1e8 -> PA 0x0000000000a2c1e8
-    DEBUG: Reading from PA 10666472 via direct map: 0x0000000003df4000
-    user_entry = 0x0000000000400000 (offset 0x1f0)
-    gdt_desc = 0x004f:0x0000000003df5d38 (offset 0x1c0)
-    idt_desc = 0x020f:0x0000000003df5df0 (offset 0x1d0)
-    tss_selector = 0x0028 (offset 0x1e0)
-
-  U->K trampoline data:
-    kernel_cr3 = 0x0000000000012000 (offset 0x38)
-    kernel_rsp_restore = 0x00001fffffffe1b0 (offset 0x40)
-  ✓ Trampoline data sections patched!
-
-✓ User CR3 written to AP task info: 0x00000000031d5000
-✓ Kernel CR3 written to AP task info: 0x0000000000012000
-✓ Interrupt config written to AP task info
-  GDT: base=0x1004041dc8, limit=79
-  IDT: base=0x1004041e80, limit=527
-  TSS: base=0x1004041e18, selector=0x28
-✓ Trampoline addresses written to AP task info
-  K->U trampoline: 0x00001fffffffe000
-  U->K trampoline: 0x00001ffffffff000
-
-=== DEBUG: Verifying GDT/TSS Memory ===
-  GDT Base: 0x1004041dc8
-    Entry 0: 0x0000000000000000
-    Entry 1: 0x00af9a000000ffff
-    Entry 2: 0x00af92000000ffff
-    Entry 3: 0x00affa000000ffff
-    Entry 4: 0x00aff2000000ffff
-    Entry 5: 0x030089df5d880067
-    Entry 6: 0x0000000000000000
-    Entry 7: 0x0000000000000000
-    Entry 8: 0x0000000000000000
-    Entry 9: 0x0000000000000000
-  GDT Limit: 79
-  TSS Base: 0x1004041e18
-    TSS[0] (reserved): 0x03dfa00000000000
-    TSS[1] (RSP0):     0x0000000000000000
-    TSS[2] (RSP1):     0x0000000000000000
-    TSS[3] (RSP2):     0x0000000000000000
-    TSS[4] (IST1..):   0x03dfa00000000000
-    TSS[12] (I/O Map): 0x0068000000000000
-=== DEBUG END ===
-
-✓ AP task info at: 0x100024adc0
-
-Testing with 2 CPUs (1 BSP + 1 AP)
-Setting up trampoline:
-  Physical address: 0x8000
-  Direct-map virtual address: 0xffffff8000008000
+[TIMESTAMP] USER_SPACE_SETUP_COMPLETE at 78981380 cycles (37610 μs)
 Copying 9280 bytes of trampoline blob to 0xffffff8000008000
 ✓ Trampoline copied successfully (9280 bytes)
-Boot trampoline copied via direct-map to physical 0x8000
-First 16 bytes at direct-map 0xffffff8000008000: [66, 31, ff, 66, 31, f6, b8, 38, 80, 66, 8c, cb, 66, c1, e3, 04]
-⚠ WARNING: Unexpected bytes (expected b0 41...)
-✓ No relocations needed (trampoline built for 0xffffff8000008000)
-Relocations applied
-BSP's current CR3: 0x12000
-Adding identity mapping for trampoline in page tables...
-✓ Identity mapping added: 0x0-0x200000 -> 0x0-0x200000
 Setting page table address to 0x12000
 ✓ Page table address set at offset 0x2000
-Page table set: 0x12000
-  CPU 1 stack in low memory: 0x90000
-  Entry address for CPU 1: 0x10001e06c0
-Initializing CPU 1: APIC ID=1, entry=0x10001e06c0, stack=0x90000, task_info=0x100024adc0
+Initializing CPU 1: APIC ID=1, entry=0x10001b8552, stack=0x90000, task_info=0x1000217dc0
 ✓ CPU 1 initialized at offset 0x2080
-Initialized CPU 1 (APIC ID 1)
-Starting CPU 1...
-  About to send SIPI...
-  SIPI vector: 0x8 (physical addr=0x8000)
-TLS initialized at 0x0000001000248bd8
-Runtime init complete
-CPU 1 online! APIC ID: 1
-TLS base: 0x0000001000248bd8
-TSS RSP0 set to: 0x000000000008fe98
-TSS descriptor set at GDT+0x28, TSS base: 0x0000001000248008
-IDT loaded at: 0x000000100024abb0 limit: 527
+TLS initialized at 0x0000001000215bd8
+TSS RSP0 set to: 0x000000000008ff48
+TSS descriptor set at GDT+0x28, TSS base: 0x0000001000215008
+IDT loaded at: 0x0000001000217bb0 limit: 527
 TSS loaded with selector: 0x0028
-Exception handlers installed
-Reading task info from shared memory...
-  User code entry point: 0x0000000000011630
-  User CR3: 0x00000000031d5000
-  K->U trampoline: 0x00001fffffffe000
-  U->K trampoline: 0x00001ffffffff000
-Task status set to RUNNING
+[TIMESTAMP] AP_BOOT_COMPLETE at 166595254 cycles (55531 μs)
+[TIMESTAMP] BEFORE_USER_EXECUTION at 169402712 cycles (56467 μs)
+[TIMESTAMP] AFTER_USER_EXECUTION at 172326540 cycles (57442 μs)
+⚠ Timeout waiting for AP task completion
 
-==========================================================
-Calling K->U trampoline at 0x00001fffffffe000
-Expected flow:
-  1. Trampoline outputs 'K' (before CR3 switch)
-  2. Trampoline outputs '>' (after CR3 switch)
-  3. Trampoline outputs 'U' (before jump to user)
-  4. User code outputs 'U' (from user space)
-  5. User code triggers INT 32
-  6. U->K trampoline outputs 'X' (before CR3 switch)
-  7. U->K trampoline outputs '<' (after CR3 switch)
-  8. U->K trampoline outputs 'K' (after returning)
-==========================================================
-
-DEBUG: K->U trampoline data section (from Rust):
-  Data start address: 0x00001fffffffe1b0
-  [0] kernel_rsp_save:  0x0000000000000000
-  [1] user_cr3_value:   0x00000000031d5000
-  [2] gdt_desc[0]:      0x000003df5d38004f
-  [3] gdt_desc[1]:      0x0000000000000000
-  [4] idt_desc[0]:      0x000003df5df0020f
-  [5] idt_desc[1]:      0x0000000000000000
-  [6] tss_selector:     0x0000000000000028
-  [7] user_stack_top:   0x0000000003df4000
-  [8] user_entry_point: 0x0000000000400000
-
-DEBUG: Code at 0x00001fffffffe000: b0 40 66 ba f8 03 ee b0
-DEBUG: Executing direct UART write '!' to confirm liveness...
-!DEBUG: Invoking function pointer...
-@K00000000031D5000C�D[000000000008FE80|00000000031D5000|000003DF5D38004F|0000000000000000|000003DF5DF0020F|0000000000000000|0000000000000028|0000000003DF4000|0000000000400000]00001FFFFFFFE1E8:L0000000003DF4000 +GI
+=== Main boot sequence complete! ===

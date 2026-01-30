@@ -2,3 +2,6 @@
 target
 build
 .config.smp-poc_qemu-x86_64
+runlog.txt
+benchmark_comparison.png
+benchmark_detailed.png
