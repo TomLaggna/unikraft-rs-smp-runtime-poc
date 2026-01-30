@@ -216,71 +216,12 @@ fn main() {
     // Initialize timing as first thing
     init_timer();
 
-    // Initialize serial console for debugging (for custom output)
-    // Note: On Unikraft with std, regular println! should work
-    // Check where we (BSP) are running from
-    let main_addr = main as *const () as u64;
-    let ap_entry_addr = ap_entry as *const () as u64;
-
     // ========================================================================
-    // TEST: Allocate memory and map at high address
-    // ========================================================================
-
-    // Step 1: Allocate buffer and find page-aligned addresses
-    const TRAMPOLINE_SIZE: usize = 3 * PAGE_SIZE;
-    let trampoline_buffer = vec![0u8; TRAMPOLINE_SIZE];
-    let buffer_va = trampoline_buffer.as_ptr() as u64;
-
-    // Get CR3
-    let kernel_cr3: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr3", out(reg) kernel_cr3);
-    }
-    let kernel_cr3_pa = kernel_cr3 & 0x0000_FFFF_FFFF_F000;
-
-    // Find page-aligned addresses within the buffer
-    let page1_va = if (buffer_va & 0xFFF) == 0 {
-        buffer_va // Already page-aligned
-    } else {
-        (buffer_va & !0xFFF) + PAGE_SIZE as u64 // Round up to next page
-    };
-    let page2_va = page1_va + PAGE_SIZE as u64;
-
-    // Walk page tables to get actual physical addresses for these VAs
-    let (page1_pa, page2_pa) = unsafe {
-        (
-            get_physical_address(kernel_cr3, page1_va),
-            get_physical_address(kernel_cr3, page2_va),
-        )
-    };
-
-    // Step 2: Map the pages at high address (but BELOW VMA management region)
-    // Unikraft's VMA system manages addresses starting from CONFIG_LIBUKVMEM_DEFAULT_BASE
-    // (likely ~0x200000000000 = 2TB based on Xen memory layout). We'll use an address
-    // just below that limit to maximize separation from user space while avoiding VMA checks.
-    const HIGH_VA_BASE: u64 = 0x0000_1FFF_FFFF_E000; // Just below 2TB (below VMA management)
-    let high_va_page1 = HIGH_VA_BASE;
-    let high_va_page2 = HIGH_VA_BASE + PAGE_SIZE as u64;
-
-    // Step 4: Map both pages at high addresses
-    unsafe {
-        if let Err(e) = map_page_in_kernel_pt(kernel_cr3, high_va_page1, page1_pa) {
-            panic!("Failed to map page 1: {}", e);
-        }
-        if let Err(e) = map_page_in_kernel_pt(kernel_cr3, high_va_page2, page2_pa) {
-            panic!("Failed to map page 2: {}", e);
-        }
-    }
-    debug_trampoline_println!("  ✓ Pages mapped successfully");
-
-    // Explicit TLB flush for both addresses
-    unsafe {
-        asm!("invlpg [{}]", in(reg) high_va_page1, options(nostack));
-        asm!("invlpg [{}]", in(reg) high_va_page2, options(nostack));
-    }
-
-    // ========================================================================
-    // TEST: User Space Manager (Dandelion Pattern)
+    // Setup User Space:
+    // - allocate buffer
+    // - setup layout (page tables, interrupts, stack, code)
+    // - copy and map interrupt setup and handlers
+    // - copy and map user code
     // ========================================================================
 
     // Create a 32 MB user address space (reduced for 1GB RAM system)
@@ -334,7 +275,6 @@ fn main() {
         panic!("Failed to map user code: {}", e);
     }
 
-    // Example: Map user stack
     // Stack must end BEFORE interrupt structures to avoid overlap
     let user_stack_size = 16 * 4096; // 64KB
     let user_stack_buf = vec![0u8; user_stack_size];
@@ -366,12 +306,6 @@ fn main() {
         panic!("Failed to map user stack: {}", e);
     }
 
-    // Map trampolines in user page tables
-    if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
-        panic!("Failed to map trampolines in user space: {}", e);
-    }
-    debug_trampoline_println!("");
-
     // User code entry point
     let user_entry_va = user_code_virt;
     // User stack top must be INSIDE the mapped region (U=1), not at the boundary
@@ -380,17 +314,88 @@ fn main() {
     // which borders the interrupt structures (U=0). Subtract 16 for alignment.
     let user_stack_top = user_stack_virt + user_stack_size - 16;
 
-    // Trampoline page 1: Kernel->User
-    // Data section layout at end of page:
-    //   Offset 0x100: saved kernel RSP (8 bytes)
-    //   Offset 0x108: user CR3 (8 bytes)
-    //   Offset 0x110: user RSP (8 bytes)
-    //   Offset 0x118: user entry (8 bytes)
-    //   Offset 0x120: GDT base (8 bytes)
-    //   Offset 0x128: GDT limit (2 bytes) + padding (6 bytes)
-    //   Offset 0x130: IDT base (8 bytes)
-    //   Offset 0x138: IDT limit (2 bytes) + padding (6 bytes)
-    //   Offset 0x140: TSS selector (2 bytes) + padding (6 bytes)
+    // Setup interrupt handlers for user space
+    // Get handler code and addresses from assembly
+    let handler_code = unsafe { user_handlers::get_handler_code() };
+    let handler_addresses = unsafe { user_handlers::get_handler_addresses() };
+    let handler_base = handler_addresses[0]; // Use first handler as base
+
+    // Get current kernel stack for TSS.RSP0
+    let kernel_stack: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) kernel_stack);
+    }
+
+    // Setup all interrupt infrastructure
+    let interrupt_config = unsafe {
+        match user_space.setup_all_interrupt_infrastructure(
+            handler_code,
+            &handler_addresses,
+            handler_base,
+            kernel_stack,
+        ) {
+            Ok(config) => config,
+            Err(e) => panic!("Failed to setup interrupt infrastructure: {}", e),
+        }
+    };
+
+    record_and_print(TimePoint::UserSpaceSetupComplete);
+
+    // ========================================================================
+    // Setup Trampolines and Patch Handlers:
+    // allocate trampoline pages, map them, copy code, patch addresses
+    // ========================================================================
+
+    // Step 1: Allocate buffer and find page-aligned addresses
+    const TRAMPOLINE_SIZE: usize = 3 * PAGE_SIZE;
+    let trampoline_buffer = vec![0u8; TRAMPOLINE_SIZE];
+    let buffer_va = trampoline_buffer.as_ptr() as u64;
+
+    // Get CR3
+    let kernel_cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) kernel_cr3);
+    }
+    let kernel_cr3_pa = kernel_cr3 & 0x0000_FFFF_FFFF_F000;
+
+    // Find page-aligned addresses within the buffer
+    let page1_va = if (buffer_va & 0xFFF) == 0 {
+        buffer_va // Already page-aligned
+    } else {
+        (buffer_va & !0xFFF) + PAGE_SIZE as u64 // Round up to next page
+    };
+    let page2_va = page1_va + PAGE_SIZE as u64;
+
+    // Walk page tables to get actual physical addresses for these VAs
+    let (page1_pa, page2_pa) = unsafe {
+        (
+            get_physical_address(kernel_cr3, page1_va),
+            get_physical_address(kernel_cr3, page2_va),
+        )
+    };
+
+    // Step 2: Map the pages at high address (but BELOW VMA management region)
+    // Unikraft's VMA system manages addresses starting from CONFIG_LIBUKVMEM_DEFAULT_BASE
+    // (likely ~0x200000000000 = 2TB based on Xen memory layout). We'll use an address
+    // just below that limit to maximize separation from user space while avoiding VMA checks.
+    const HIGH_VA_BASE: u64 = 0x0000_1FFF_FFFF_E000; // Just below 2TB (below VMA management)
+    let high_va_page1 = HIGH_VA_BASE;
+    let high_va_page2 = HIGH_VA_BASE + PAGE_SIZE as u64;
+
+    // Step 4: Map both pages at high addresses
+    unsafe {
+        if let Err(e) = map_page_in_kernel_pt(kernel_cr3, high_va_page1, page1_pa) {
+            panic!("Failed to map page 1: {}", e);
+        }
+        if let Err(e) = map_page_in_kernel_pt(kernel_cr3, high_va_page2, page2_pa) {
+            panic!("Failed to map page 2: {}", e);
+        }
+    }
+
+    // Map trampolines in user page tables
+    if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
+        panic!("Failed to map trampolines in user space: {}", e);
+    }
 
     // Copy K->U trampoline code to page 1
     unsafe {
@@ -407,32 +412,6 @@ fn main() {
         let dst = high_va_page2 as *mut u8;
         core::ptr::copy_nonoverlapping(u2k_code.as_ptr(), dst, u2k_code.len());
     }
-
-    // Setup interrupt handlers for user space
-    // Get handler code and addresses from assembly
-    let handler_code = unsafe { user_handlers::get_handler_code() };
-    let handler_addresses = unsafe { user_handlers::get_handler_addresses() };
-    let handler_base = handler_addresses[0]; // Use first handler as base
-
-    // Get current kernel stack for TSS.RSP0
-    let kernel_stack: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) kernel_stack);
-    }
-    debug_trampoline_println!("Kernel stack (for TSS.RSP0): 0x{:016x}", kernel_stack);
-
-    // Setup all interrupt infrastructure
-    let interrupt_config = unsafe {
-        match user_space.setup_all_interrupt_infrastructure(
-            handler_code,
-            &handler_addresses,
-            handler_base,
-            kernel_stack,
-        ) {
-            Ok(config) => config,
-            Err(e) => panic!("Failed to setup interrupt infrastructure: {}", e),
-        }
-    };
 
     // Patch the trampoline address into INT 32 handler
     unsafe {
@@ -544,7 +523,7 @@ fn main() {
     let task_info_ptr = unsafe { &raw const AP_TASK_INFO as *const ApTaskInfo as u64 };
 
     // Record timestamp: User space memory setup complete
-    record_and_print(TimePoint::UserSpaceSetupComplete);
+    record_and_print(TimePoint::UserTrampolineSetupComplete);
 
     // Step 3: Get number of CPUs from ACPI (simplified - assumes 2 CPUs)
     // For debugging, only start 1 AP
@@ -583,6 +562,8 @@ fn main() {
                 panic!("Failed to initialize CPU {}: {}", i, e);
             }
         }
+
+        record_and_print(TimePoint::BootTrampolineSetupComplete);
 
         // Step 1: Enable x2APIC on BSP
         unsafe {

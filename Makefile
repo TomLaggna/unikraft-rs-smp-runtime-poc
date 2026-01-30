@@ -117,6 +117,17 @@ run: build-initrd
 	fi
 	$(QEMU) $(QEMU_FLAGS)
 
+run-bench: 
+	@if [ ! -f $(KERNEL) ]; then \
+		echo "Error: Kernel not found at $(KERNEL)"; \
+		exit 1; \
+	fi
+	@if [ ! -f $(INITRD) ]; then \
+		echo "Error: Initramfs not found at $(INITRD)"; \
+		exit 1; \
+	fi
+	$(QEMU) $(QEMU_FLAGS)
+
 # Run with GDB support
 debug: all
 	@echo "Starting QEMU with GDB server on port 1234..."

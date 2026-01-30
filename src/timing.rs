@@ -21,12 +21,18 @@ pub enum TimePoint {
     BeforeUserExecution,
     /// AP: After AP executes user function
     AfterUserExecution,
+    /// BSP: After user (u2k/k2u) trampoline setup complete
+    UserTrampolineSetupComplete,
+    /// BSP: After boot trampoline setup complete
+    BootTrampolineSetupComplete,
 }
 
 impl TimePoint {
     fn name(&self) -> &'static str {
         match self {
             TimePoint::UserSpaceSetupComplete => "USER_SPACE_SETUP_COMPLETE",
+            TimePoint::UserTrampolineSetupComplete => "USER_TRAMPOLINE_SETUP_COMPLETE",
+            TimePoint::BootTrampolineSetupComplete => "BOOT_TRAMPOLINE_SETUP_COMPLETE",
             TimePoint::ApBootComplete => "AP_BOOT_COMPLETE",
             TimePoint::BeforeUserExecution => "BEFORE_USER_EXECUTION",
             TimePoint::AfterUserExecution => "AFTER_USER_EXECUTION",
@@ -79,8 +85,8 @@ pub fn record_and_print(point: TimePoint) {
 pub fn record_and_print_ap(point: TimePoint) {
     let cycles = elapsed_cycles();
 
-    // Convert cycles to microseconds (assuming ~3 GHz CPU)
-    let micros = cycles / 3000;
+    // Convert cycles to microseconds using same constant as BSP
+    let micros = cycles / CPU_MHZ;
 
     // Use the ap_println macro which is safe for AP use
     crate::ap_println!(
