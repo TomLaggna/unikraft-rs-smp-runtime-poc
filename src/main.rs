@@ -283,8 +283,8 @@ fn main() {
     // TEST: User Space Manager (Dandelion Pattern)
     // ========================================================================
 
-    // Create a 64 MB user address space (reduced for 1GB RAM system)
-    const USER_SPACE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    // Create a 32 MB user address space (reduced for 1GB RAM system)
+    const USER_SPACE_SIZE: usize = 32 * 1024 * 1024; // 32 MB
     let mut user_space = unsafe {
         match user_pagetable::UserSpaceManager::new(USER_SPACE_SIZE) {
             Ok(us) => us,
