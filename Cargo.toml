@@ -9,7 +9,7 @@ edition = "2021"
 x86 = "0.52"
 
 [features]
-default = ["debug-all"]
+default = []
 debug-all = ["debug-ap-boot", "debug-user-mem", "debug-trampoline"]
 debug-ap-boot = []     # Debug AP startup and initialization
 debug-user-mem = []    # Debug user page tables and memory layout

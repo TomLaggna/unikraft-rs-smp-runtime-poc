@@ -270,18 +270,7 @@ EXCEPTION_HANDLER_NO_ERR 31, 'V'  // Reserved
 // This handler jumps to the User->Kernel trampoline
 // The trampoline address will be patched in at runtime (see TRAMPOLINE_ADDR_OFFSET)
 .globl user_exception_handler_32
-user_exception_handler_32:
-    // Output 'X' to signal user exit attempt
-    push rax
-    push rdx
-    
-    mov al, 'X'
-    mov dx, {COM1}
-    out dx, al
-    
-    pop rdx
-    pop rax
-    
+user_exception_handler_32:    
     // Jump to User->Kernel trampoline
     // This address will be patched at runtime
     // mov rax, <trampoline_address>
@@ -336,7 +325,7 @@ extern "C" {
     fn user_exception_handler_30();
     fn user_exception_handler_31();
     fn user_exception_handler_32();
-    
+
     static user_handlers_start: u8;
     static user_handlers_end: u8;
     static user_handler_32_trampoline_addr: u64;

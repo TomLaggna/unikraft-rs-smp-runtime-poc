@@ -18,17 +18,6 @@ trampoline_k2u_start:
 
 .globl trampoline_kernel_to_user
 trampoline_kernel_to_user:
-    /* VERY FIRST THING: Output '@' to show we entered */
-    /* Use only RAX and DX - no stack, no memory */
-    mov al, '@'
-    mov dx, 0x3F8
-    out dx, al
-    /* Removed infinite loop here */
-
-    /* Debug: Output 'K' before any processing */
-    mov al, 'K'
-    out dx, al
-    
     /* Now save registers we'll use */
     push rax
     push rdx
@@ -59,398 +48,30 @@ trampoline_kernel_to_user:
     lea rax, [rip + kernel_rsp_save]
     mov [rax], rsp
 
-    /* Pre-load values for debug output BEFORE CR3 switch */
-    /* We'll use these after CR3 when stack isn't safe yet */
-    mov dl, '>'      /* Character to output */
-    mov bx, 0x3F8    /* UART port */
 
     /* Load user CR3 - CRITICAL: After this, kernel stack is unmapped! */
     lea rax, [rip + user_cr3_value]
     mov rax, [rax]
-    
-    /* DEBUG: Print CR3 value BEFORE switching (16 hex digits) */
-    mov rcx, rax     /* Save CR3 in RCX */
-    mov r8, 16       /* Loop counter */
-    
-print_cr3_loop:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle 2f
-    add al, 7
-2:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz print_cr3_loop
-    
-    /* Output 'C' marker after CR3 value */
-    mov al, 'C'
-    mov dx, 0x3F8
-    out dx, al
-    
-    /* Restore CR3 value from saved position and switch */
-    lea rax, [rip + user_cr3_value]
-    mov rax, [rax]
     mov cr3, rax
 
-    /* IMMEDIATELY output to show CR3 switch worked */
-    /* This uses pre-loaded registers, no memory or stack access */
-    mov al, dl       /* Get the '>' character */
-    mov dx, bx       /* Get the port */
-    out dx, al       /* Output! */
-
-    /* Explicitly flush TLB for GDT page to ensure we see fresh data */
-    /* This is critical because AP may have stale TLB entries */
-    lea rax, [rip + gdt_desc]
-    mov rax, [rax + 2]    /* Get GDT base from descriptor */
-    invlpg [rax]          /* Flush TLB for GDT base page */
-
-    /* DEBUG: Dump entire data section AFTER CR3 switch (reading via USER page tables) */
-    mov al, 'D'
-    mov dx, 0x3F8
-    out dx, al
-    mov al, '['
-    out dx, al
-    
-    /* Dump 9 quads: kernel_rsp, user_cr3, gdt_desc[2], idt_desc[2], tss, user_stack, user_entry */
-    lea rsi, [rip + k2u_data_start]  /* Start of data section */
-    mov r10, 9                        /* Loop counter: 9 quads */
-    
-dump_quad_loop:
-    /* Load quad (8 bytes) from [rsi] - READING VIA USER PAGE TABLES NOW */
-    mov rcx, [rsi]                    /* Load 8-byte value */
-    mov r8, 16                        /* 16 hex digits per quad */
-    
-dump_nibble_loop:
-    /* Get top nibble of RCX */
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    
-    /* Convert to ASCII hex */
-    add al, '0'
-    cmp al, '9'
-    jle 1f
-    add al, 7
-1:
-    mov dx, 0x3F8
-    out dx, al
-    
-    /* Shift left for next nibble */
-    shl rcx, 4
-    dec r8
-    jnz dump_nibble_loop
-    
-    /* Move to next quad */
-    add rsi, 8
-    
-    /* Print delimiter between quads */
-    dec r10
-    jz dump_data_done
-    mov al, '|'
-    mov dx, 0x3F8
-    out dx, al
-    jmp dump_quad_loop
-    
-dump_data_done:
-    mov al, ']'
-    mov dx, 0x3F8
-    out dx, al
-
-    /* Set up GDT after switching CR3, before setting RSP */
-    lea rax, [rip + gdt_desc]
-    lgdt [rax]
 
     /* NOW switch to user stack (mapped in user page tables) */
     /* This requires memory access via new page tables */
-    /* CRITICAL: Cannot use stack here - it's unmapped! */
     lea rax, [rip + user_stack_top]
-
-    /* Debug: Print the ADDRESS we computed (value in RAX) */
-    mov rcx, rax     /* Save address in RCX */
-    mov r8, 16       /* Loop counter */
-
-print_addr_loop:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle 1f
-    add al, 7
-1:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz print_addr_loop
-
-    /* Output ':' separator */
-    mov al, ':'
-    out dx, al
-
-    /* Now restore RAX and do the actual load */
-    lea rax, [rip + user_stack_top]
-
-    /* Debug: Output 'L' to show LEA worked */
-    /* CRITICAL: Can't use push/AL here - stack unmapped and would corrupt RAX! */
-    mov r15, rax     /* Save RAX in R15 (no stack needed) */
-    mov al, 'L'
-    mov dx, 0x3F8
-    out dx, al
-    mov rax, r15     /* Restore RAX */
-
     mov rsp, [rax]   /* CRITICAL: This loads from user page tables! */
-    
-    /* Debug: Output full RSP value as 16 hex digits */
-    mov rcx, rsp     /* Save RSP in RCX */
-    mov r8, 16       /* Loop counter: 16 nibbles */
-    
-output_rsp_loop:
-    /* Get top nibble of RCX */
-    mov rax, rcx
-    shr rax, 60      /* Shift right by 60 bits to get top nibble */
-    and eax, 0xF     /* Mask to 4 bits */
-    
-    /* Convert to ASCII hex */
-    add al, '0'
-    cmp al, '9'
-    jle output_digit
-    add al, 7        /* 'A' - '9' - 1 = 7 */
-    
-output_digit:
-    mov dx, 0x3F8
-    out dx, al
-    
-    /* Shift RCX left by 4 bits for next nibble */
-    shl rcx, 4
-    
-    /* Decrement counter and loop */
-    dec r8
-    jnz output_rsp_loop
-    
-    /* Output space after the hex value */
-    mov al, 0x20
-    out dx, al
-    
-    /* Restore RSP from original value (it's still in RSP register) */
 
-    /* NOW we can use the stack again */
-    /* Debug: Output '+' to show stack switch worked */
-    push rax
-    push rdx
-    mov al, '+'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
-
-    /* Load GDT - segment registers don't need updating since
-       both kernel and user GDTs have identical layout */
+    /* Load GDT */
     lea rax, [rip + gdt_desc]
     lgdt [rax]
-
-    /* Debug: Output 'G' */
-    push rax
-    push rdx
-    mov al, 'G'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
 
     /* Load IDT */
     lea rax, [rip + idt_desc]
     lidt [rax]
 
-    /* Debug: Output 'I' */
-    push rax
-    push rdx
-    mov al, 'I'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
-
-    /* Debug: Try to read from GDT to verify it's accessible */
-    /* Read GDTR to get base address */
-    sub rsp, 16
-    sgdt [rsp]
-    mov rax, [rsp + 2]            /* GDT base (starts at offset 2) */
-    add rsp, 16
-    
-    /* Debug: Print the GDT base address we got from SGDT */
-    mov rcx, rax     /* Save GDT base in RCX */
-    push rcx         /* Save it on stack too */
-    mov r8, 16       /* 16 hex digits */
-print_gdt_base:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle 1f
-    add al, 7
-1:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz print_gdt_base
-    
-    mov al, 'g'      /* lowercase g = about to read from GDT */
-    out dx, al
-    
-    pop rax          /* Restore GDT base */
-    
-    /* Read first byte of GDT entry 5 (TSS descriptor at offset 0x28) */
-    mov rbx, rax
-    add rbx, 0x28                 /* TSS descriptor offset */
-    mov cl, [rbx]                 /* Read first byte - should be 0x67 (limit low) */
-    
-    /* Print the byte we read */
-    push rax
-    push rdx
-    /* High nibble */
-    mov al, cl
-    shr al, 4
-    and al, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lgdt_byte_hi_ok
-    add al, 7
-.Lgdt_byte_hi_ok:
-    mov dx, 0x3F8
-    out dx, al
-    /* Low nibble */
-    mov al, cl
-    and al, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lgdt_byte_lo_ok
-    add al, 7
-.Lgdt_byte_lo_ok:
-    out dx, al
-    mov al, ':'
-    out dx, al
-    pop rdx
-    pop rax
-
     /* Load TSS */
     lea rax, [rip + tss_selector]
     movzx eax, word ptr [rax]
-    
     ltr ax
-
-    /* Debug: Output 'T' */
-    push rax
-    push rdx
-    mov al, 'T'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
-    
-    /* Debug: Read TSS RSP0 and IST1 to verify they're correct */
-    /* First get GDT base to find TSS descriptor, then TSS base */
-    sub rsp, 16
-    sgdt [rsp]
-    mov rax, [rsp + 2]   /* GDT base */
-    add rsp, 16
-    
-    /* TSS descriptor is at GDT+0x28, base is at bytes 2-4, 7, and 8-11 */
-    /* For simplicity, just read TSS.IST1 which should be at TSS+0x24 */
-    add rax, 0x28        /* Point to TSS descriptor */
-    
-    /* Extract TSS base from descriptor (complex format, skip for now) */
-    /* Instead, use the gdt_desc base + TSS offset we know */
-    /* TSS is 80 bytes after GDT start in our layout */
-    lea rax, [rip + gdt_desc]
-    mov rax, [rax + 2]   /* Get GDT base from descriptor */
-    add rax, 80          /* TSS is at GDT+80 in our layout */
-    
-    /* Now RAX points to TSS. Read IST1 at offset 0x24 */
-    mov rcx, [rax + 0x24]
-    
-    /* Output 'S' then IST1 value */
-    push rcx
-    mov al, 'S'
-    mov dx, 0x3F8
-    out dx, al
-    pop rcx
-    
-    /* Print IST1 value (16 hex digits) */
-    mov r8, 16
-print_ist1:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle 1f
-    add al, 7
-1:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz print_ist1
-    
-    mov al, ':'
-    out dx, al
-
-    /* User stack is already set (we did it right after CR3 switch) */
-
-    /* Debug: Output 'U' before jumping to user code */
-    push rax
-    push rdx
-    mov al, 'U'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
-
-    /* ================================================================
-     * FLUSH TLB for critical interrupt handling pages
-     * These pages are set up by BSP but we're running on AP with
-     * potentially stale TLB entries after CR3 switch
-     * ================================================================ */
-    
-    /* Flush page 0 (null page - should not be present) */
-    xor rax, rax
-    invlpg [rax]
-    
-    /* Flush handler code page (0x3df4000) */
-    mov rax, 0x3df4000
-    invlpg [rax]
-    
-    /* Flush GDT/TSS/IDT page (0x3df5000) */
-    mov rax, 0x3df5000
-    invlpg [rax]
-    
-    /* Flush interrupt stack pages (0x3df6000 - 0x3dfc000) */
-    mov rax, 0x3df6000
-    invlpg [rax]
-    mov rax, 0x3df7000
-    invlpg [rax]
-    mov rax, 0x3df8000
-    invlpg [rax]
-    mov rax, 0x3df9000
-    invlpg [rax]
-    mov rax, 0x3dfa000
-    invlpg [rax]
-    mov rax, 0x3dfb000
-    invlpg [rax]
-    mov rax, 0x3dfc000
-    invlpg [rax]
-    
-    /* Flush user code page (0x400000) */
-    mov rax, 0x400000
-    invlpg [rax]
 
     /* ================================================================
      * RING TRANSITION: Switch from ring 0 to ring 3 using iretq
@@ -487,95 +108,6 @@ print_ist1:
     lea rax, [rip + user_entry_point]
     mov rax, [rax]
     push rax
-    
-    /* Debug: Print first 8 bytes at user entry point (0x400000) */
-    mov rax, [rsp]       /* Get RIP from stack (user entry point) */
-    mov rbx, [rax]       /* Read first 8 bytes at that address */
-    
-    /* Print 'C' for Code, then 8 bytes as hex */
-    mov al, 'C'
-    mov dx, 0x3F8
-    out dx, al
-    
-    mov rax, rbx
-    mov rcx, 16
-.Lprint_code:
-    rol rax, 4
-    push rax
-    and al, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lcode_digit_ok
-    add al, 7
-.Lcode_digit_ok:
-    mov dx, 0x3F8
-    out dx, al
-    pop rax
-    dec rcx
-    jnz .Lprint_code
-    
-    mov al, ':'
-    mov dx, 0x3F8
-    out dx, al
-    
-    /* Debug: Output 'R' (Ring transition) before iretq */
-    mov al, 'R'
-    mov dx, 0x3F8
-    out dx, al
-    
-    /* Debug: Read and print IDT entry 32 handler address */
-    /* First get IDT base from SIDT */
-    sub rsp, 16
-    sidt [rsp]
-    mov rax, [rsp + 2]   /* IDT base at offset 2 */
-    add rsp, 16
-    
-    /* IDT entry 32 is at base + 32*16 = base + 0x200 */
-    add rax, 0x200
-    
-    /* Read low qword of IDT entry (contains offset_low, selector, IST, type, offset_mid) */
-    mov rbx, [rax]
-    
-    /* Extract handler address:
-     * offset_low  = bits 0-15  of rbx
-     * offset_mid  = bits 48-63 of rbx
-     * offset_high = [rax + 8] bits 0-31
-     */
-    mov rcx, rbx
-    and rcx, 0xFFFF           /* offset_low */
-    mov r9, rbx
-    shr r9, 48                /* offset_mid */
-    shl r9, 16
-    or rcx, r9                /* combine low and mid */
-    mov r9, [rax + 8]         /* high qword */
-    mov r10, 0xFFFFFFFF
-    and r9, r10               /* offset_high (mask with reg) */
-    shl r9, 32
-    or rcx, r9                /* full 64-bit handler address in RCX */
-    
-    /* Print 'H' then handler address */
-    push rcx
-    mov al, 'H'
-    mov dx, 0x3F8
-    out dx, al
-    pop rcx
-    
-    /* Print handler address (16 hex digits) */
-    mov r8, 16
-.Lprint_handler:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle 1f
-    add al, 7
-1:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lprint_handler
     
     /* Perform the ring transition! */
     iretq
@@ -652,14 +184,6 @@ trampoline_u2k_start:
 
 .globl trampoline_user_to_kernel
 trampoline_user_to_kernel:
-    /* Debug: Output 'X' before CR3 switch */
-    push rax
-    push rdx
-    mov al, 'X'
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rax
 
     /* ================================================================
      * SWITCH CR3 TO KERNEL
@@ -677,167 +201,23 @@ trampoline_user_to_kernel:
     /* Restore kernel RSP from data section */
     lea rax, [rip + kernel_rsp_restore]
     mov rsp, [rax]
-
-    /* Debug: Print 'S' for Stack restored, then RSP value */
-    mov al, 'S'
-    mov dx, 0x3F8
-    out dx, al
-    mov rcx, rsp
-    mov r8, 16
-.Lu2k_print_rsp:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lu2k_rsp_ok
-    add al, 7
-.Lu2k_rsp_ok:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lu2k_print_rsp
-    mov al, 0x20    /* space */
-    out dx, al
-
     /* ================================================================
      * RESTORE KERNEL GDT/IDT
      * K2U pushed these on the stack before saving RSP.
      * Stack layout: [GDT desc 16 bytes][IDT desc 16 bytes][rdx][rax][ret addr]
      * ================================================================ */
 
-    /* Debug: Print GDT descriptor we're about to load */
-    mov al, 'G'
-    mov dx, 0x3F8
-    out dx, al
-    mov rcx, [rsp]      /* First 8 bytes of GDT desc (limit + base low) */
-    mov r8, 16
-.Lu2k_print_gdt:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lu2k_gdt_ok
-    add al, 7
-.Lu2k_gdt_ok:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lu2k_print_gdt
-    mov al, 0x20    /* space */
-    out dx, al
     
     /* Pop and restore kernel GDT */
     lgdt [rsp]
     add rsp, 16
-
-    /* Debug: Print IDT descriptor we're about to load */
-    mov al, 'I'
-    mov dx, 0x3F8
-    out dx, al
-    mov rcx, [rsp]      /* First 8 bytes of IDT desc (limit + base low) */
-    mov r8, 16
-.Lu2k_print_idt:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lu2k_idt_ok
-    add al, 7
-.Lu2k_idt_ok:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lu2k_print_idt
-    mov al, 0x20    /* space */
-    out dx, al
     
     /* Pop and restore kernel IDT */
     lidt [rsp]
-    add rsp, 16
+    add rsp, 16    
 
-    /* Debug: Verify IDT was loaded correctly using SIDT */
-    sub rsp, 16
-    sidt [rsp]
-    mov al, 'V'     /* V for Verify */
-    mov dx, 0x3F8
-    out dx, al
-    mov rcx, [rsp]
-    mov r8, 16
-.Lu2k_print_verify:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lu2k_verify_ok
-    add al, 7
-.Lu2k_verify_ok:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lu2k_print_verify
-    add rsp, 16
-    mov al, 0x20    /* space */
-    mov dx, 0x3F8
-    out dx, al
-
-    /* Debug: Output 'K' back in kernel */
-    mov al, 'K'
-    mov dx, 0x3F8
-    out dx, al
-
-    /* Pop the registers K2U saved at the start */
     pop rdx
     pop rax
-
-    /* Debug: Print return address before ret */
-    mov rcx, [rsp]    /* Return address is at top of stack */
-    push rax
-    push rdx
-    
-    mov al, 0x20    /* space */
-    mov dx, 0x3F8
-    out dx, al
-    mov al, 'R'
-    out dx, al
-    mov al, 'A'
-    out dx, al
-    mov al, ':'
-    out dx, al
-    
-    /* Print return address (16 hex digits) */
-    mov r8, 16
-.Lu2k_print_ret_addr:
-    mov rax, rcx
-    shr rax, 60
-    and eax, 0xF
-    add al, '0'
-    cmp al, '9'
-    jle .Lu2k_ret_ok
-    add al, 7
-.Lu2k_ret_ok:
-    mov dx, 0x3F8
-    out dx, al
-    shl rcx, 4
-    dec r8
-    jnz .Lu2k_print_ret_addr
-    
-    mov al, '!'
-    mov dx, 0x3F8
-    out dx, al
-    mov al, 0x0A    /* newline */
-    out dx, al
-    
-    pop rdx
-    pop rax
-
     /* Return to caller (K2U's caller - the AP loop) */
     ret
 

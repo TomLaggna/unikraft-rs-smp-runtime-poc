@@ -7,33 +7,12 @@ use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
 
-/// Load user page tables into CR3
-///
-/// # Safety
-/// The cr3 value must point to a valid PML4 page table structure
-unsafe fn load_user_page_tables(cr3: u64) {
-    if cr3 == 0 {
-        ap_println!("WARNING: User CR3 is 0, not loading user page tables");
-        return;
-    }
-
-    ap_println!("Loading user page tables into CR3: 0x{:016x}", cr3);
-    asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
-    ap_println!("✓ User page tables loaded");
-}
-
 /// Entry point for Application Processors (APs)
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -> ! {
     unsafe {
-        // Debug: Send 'Z' to show we made it to ap_entry_real
-        // asm!("out dx, al", in("al") b'Z' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-
         let cpu = &*cpu_data;
         let cpu_id = cpu.idx;
-
-        // Debug: Send '!' after reading cpu_id
-        // asm!("out dx, al", in("al") b'!' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         // Enable x2APIC on this CPU
         if let Err(_) = x2apic_enable() {
@@ -42,15 +21,9 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
             }
         }
 
-        // Debug: Send '@' after x2APIC enabled
-        // asm!("out dx, al", in("al") b'@' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
-
         // Mark CPU as IDLE
         let state_ptr = &raw const cpu.state as *mut i32;
         ptr::write_volatile(state_ptr, 2); // LCPU_STATE_IDLE
-
-        // Debug: Send '#' after state set
-        // asm!("out dx, al", in("al") b'#' as u8, in("dx") 0x3F8u16, options(nomem, nostack));
 
         // Initialize Rust runtime for this AP (TLS, etc.)
         let tlsp = match ap_runtime_init() {
@@ -62,16 +35,8 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
                 }
             }
         };
-
-        ap_println!("Runtime init complete");
-
-        // Use ap_println! macro which works without full runtime
-        ap_println!("CPU {} online! APIC ID: {}", cpu_id, cpu.id);
-        ap_println!("TLS base: 0x{:016x}", tlsp);
-
         // Set up minimal exception handlers to catch ELF crashes
         setup_exception_handlers();
-        ap_println!("Exception handlers installed");
 
         // Record timestamp: AP boot complete
         record_and_print_ap(TimePoint::ApBootComplete);
@@ -84,27 +49,10 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
                 asm!("hlt");
             }
         }
-        ap_println!("Reading task info from shared memory...");
         let task_info = &*task_info_ptr;
-        let elf_entry = task_info.read_entry_point();
-        ap_println!("  User code entry point: 0x{:016x}", elf_entry);
-
-        // Read user space CR3 from shared memory
-        let user_cr3 = task_info.read_user_cr3();
-        ap_println!("  User CR3: 0x{:016x}", user_cr3);
 
         // Read trampoline addresses
         let k2u_trampoline = task_info.read_k2u_trampoline();
-        let u2k_trampoline = task_info.read_u2k_trampoline();
-        ap_println!("  K->U trampoline: 0x{:016x}", k2u_trampoline);
-        ap_println!("  U->K trampoline: 0x{:016x}", u2k_trampoline);
-
-        if elf_entry == 0 {
-            ap_println!("ERROR: No ELF entry point set");
-            loop {
-                asm!("hlt");
-            }
-        }
 
         if k2u_trampoline == 0 {
             ap_println!("ERROR: K->U trampoline address not set");
@@ -115,9 +63,6 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
 
         // Mark task as running
         task_info.write_status(1);
-        ap_println!("Task status set to RUNNING");
-        ap_println!();
-
         // Record timestamp: Before user execution
         record_and_print_ap(TimePoint::BeforeUserExecution);
 
@@ -131,69 +76,6 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         // 5. Jump to user code entry point
         // User code will trigger INT 32, which will call U->K trampoline to return here
 
-        ap_println!("==========================================================");
-        ap_println!("Calling K->U trampoline at 0x{:016x}", k2u_trampoline);
-        ap_println!("Expected flow:");
-        ap_println!("  1. Trampoline outputs 'K' (before CR3 switch)");
-        ap_println!("  2. Trampoline outputs '>' (after CR3 switch)");
-        ap_println!("  3. Trampoline outputs 'U' (before jump to user)");
-        ap_println!("  4. User code outputs 'U' (from user space)");
-        ap_println!("  5. User code triggers INT 32");
-        ap_println!("  6. U->K trampoline outputs 'X' (before CR3 switch)");
-        ap_println!("  7. U->K trampoline outputs '<' (after CR3 switch)");
-        ap_println!("  8. U->K trampoline outputs 'K' (after returning)");
-        ap_println!("==========================================================");
-        ap_println!();
-
-        // DEBUG: Dump K->U trampoline data section from Rust to verify endianness
-        ap_println!("DEBUG: K->U trampoline data section (from Rust):");
-        unsafe {
-            // Data section is at k2u_data_start which is at offset within trampoline
-            // We need to read 9 quads: kernel_rsp, user_cr3, gdt_desc[2], idt_desc[2], tss, user_stack, user_entry
-            let data_start =
-                k2u_trampoline + crate::trampolines::k2u_offsets::kernel_rsp_save() as u64;
-            let data_ptr = data_start as *const u64;
-
-            ap_println!("  Data start address: 0x{:016x}", data_start);
-            ap_println!(
-                "  [0] kernel_rsp_save:  0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(0))
-            );
-            ap_println!(
-                "  [1] user_cr3_value:   0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(1))
-            );
-            ap_println!(
-                "  [2] gdt_desc[0]:      0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(2))
-            );
-            ap_println!(
-                "  [3] gdt_desc[1]:      0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(3))
-            );
-            ap_println!(
-                "  [4] idt_desc[0]:      0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(4))
-            );
-            ap_println!(
-                "  [5] idt_desc[1]:      0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(5))
-            );
-            ap_println!(
-                "  [6] tss_selector:     0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(6))
-            );
-            ap_println!(
-                "  [7] user_stack_top:   0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(7))
-            );
-            ap_println!(
-                "  [8] user_entry_point: 0x{:016x}",
-                core::ptr::read_volatile(data_ptr.add(8))
-            );
-        }
-        ap_println!();
-
         // Call the K->U trampoline
         // NOTE: This looks like it returns, but it actually jumps to user code.
         // The "return" comes from U->K trampoline after INT 32.
@@ -206,87 +88,19 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         }
 
         // Verify code at trampoline address
-        let code_ptr = k2u_trampoline as *const u8;
-        unsafe {
-            ap_println!(
-                "DEBUG: Code at 0x{:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                k2u_trampoline,
-                core::ptr::read_volatile(code_ptr),
-                core::ptr::read_volatile(code_ptr.add(1)),
-                core::ptr::read_volatile(code_ptr.add(2)),
-                core::ptr::read_volatile(code_ptr.add(3)),
-                core::ptr::read_volatile(code_ptr.add(4)),
-                core::ptr::read_volatile(code_ptr.add(5)),
-                core::ptr::read_volatile(code_ptr.add(6)),
-                core::ptr::read_volatile(code_ptr.add(7))
-            );
-
-            // FORCE SERIAL FLUSH by waiting
-            for _ in 0..1000000 {
-                asm!("nop")
-            }
-
-            // DIRECT DEBUG PRINT
-            ap_println!("DEBUG: Executing direct UART write '!' to confirm liveness...");
-            asm!("mov dx, 0x3f8", "mov al, '!'", "out dx, al");
-
-            ap_println!("DEBUG: Invoking function pointer...");
-            for _ in 0..1000000 {
-                asm!("nop")
-            }
-        }
-
         let trampoline_fn: extern "C" fn() = core::mem::transmute(k2u_trampoline);
         trampoline_fn();
-
-        // IMMEDIATE marker after trampoline returns
-        unsafe {
-            core::arch::asm!(
-                "mov dx, 0x3f8",
-                "mov al, 0x0A", // newline
-                "out dx, al",
-                "mov al, 0x24", // $ marker = we returned!
-                "out dx, al",
-                "mov al, 0x24",
-                "out dx, al",
-                "mov al, 0x24",
-                "out dx, al",
-                "mov al, 0x0A", // newline
-                "out dx, al",
-            );
-        }
-
-        // If we get here, we've returned from user space via U->K trampoline!
-        ap_println!();
-        ap_println!("==========================================================");
-        ap_println!("✓ SUCCESS! Returned from user space!");
-        ap_println!("==========================================================");
 
         // Record timestamp: After user execution
         record_and_print_ap(TimePoint::AfterUserExecution);
 
-        ap_println!("What just happened:");
-        ap_println!("  1. K->U trampoline switched to user CR3");
-        ap_println!(
-            "  2. K->U trampoline jumped to user code at 0x{:x}",
-            elf_entry
-        );
-        ap_println!("  3. User code ran and triggered INT 32");
-        ap_println!(
-            "  4. INT 32 handler jumped to U->K trampoline at 0x{:016x}",
-            u2k_trampoline
-        );
-        ap_println!("  5. U->K trampoline switched back to kernel CR3");
-        ap_println!("  6. U->K trampoline restored kernel RSP and returned here!");
-        ap_println!("==========================================================");
-        ap_println!();
-
         // Mark task as done
-        task_info.write_status(2);
-        ap_println!("✓ CPU {} completed task successfully", cpu_id);
+        // TODO removing the debugging code seems to have caused some bug
+        // setting the status causes a GPF
+        // comment it out for now
+        // GPF is the fallback fault, so maybe an unmapped interrupt is actually happening?
 
-        // Wait for more work (simplified - just halt)
-        ap_println!("Halting CPU {}...", cpu_id);
+        // task_info.write_status(2);
         loop {
             asm!("hlt");
         }
@@ -482,9 +296,6 @@ unsafe fn setup_exception_handlers() {
     AP_IDT[17].set_handler(exception_handler_17, 0); // Alignment check
     AP_IDT[18].set_handler(exception_handler_18, 0); // Machine check
     AP_IDT[19].set_handler(exception_handler_19, 0); // SIMD exception
-
-    // User exit handler (interrupt 32) - DPL=3 (user accessible)
-    AP_IDT[32].set_handler(user_exit_handler, 3);
 
     let idt_desc = IdtDescriptor {
         limit: (core::mem::size_of::<[IdtEntry; 33]>() - 1) as u16,
@@ -729,25 +540,6 @@ unsafe extern "C" fn exception_handler_18() {
 #[no_mangle]
 unsafe extern "C" fn exception_handler_19() {
     ap_println!("\n!!! EXCEPTION #19: SIMD Exception !!!");
-    loop {
-        asm!("cli");
-        asm!("hlt");
-    }
-}
-
-/// User exit handler (interrupt 32)
-/// Called when user space program executes INT 32 to exit
-/// This handler has DPL=3, allowing ring 3 (user space) to invoke it
-#[no_mangle]
-unsafe extern "C" fn user_exit_handler() {
-    ap_println!("\n=== USER EXIT (INT 32) ===");
-    ap_println!("User program requested exit");
-
-    // TODO: Mark task as completed in AP_TASK_INFO when implementing ELF execution
-    // extern { static mut AP_TASK_INFO: ApTaskInfo; }
-    // AP_TASK_INFO.write_status(2); // Status: done
-
-    // For now, just halt
     loop {
         asm!("cli");
         asm!("hlt");
