@@ -25,9 +25,9 @@ class PoCTimestamps:
     """Timestamps from the PoC benchmark (in microseconds)"""
     user_space_setup_complete: int = 0
     user_trampoline_setup_complete: int = 0
+    patching_user_space_complete: int = 0
     boot_trampoline_setup_complete: int = 0
     ap_boot_complete: int = 0
-    before_user_execution: int = 0
     after_user_execution: int = 0
 
 
@@ -82,12 +82,12 @@ def run_poc_benchmark() -> Optional[PoCTimestamps]:
             timestamps.user_space_setup_complete = micros
         elif name == "USER_TRAMPOLINE_SETUP_COMPLETE":
             timestamps.user_trampoline_setup_complete = micros
+        elif name == "PATCHING_USER_SPACE_COMPLETE":
+            timestamps.patching_user_space_complete = micros
         elif name == "BOOT_TRAMPOLINE_SETUP_COMPLETE":
             timestamps.boot_trampoline_setup_complete = micros
         elif name == "AP_BOOT_COMPLETE":
             timestamps.ap_boot_complete = micros
-        elif name == "BEFORE_USER_EXECUTION":
-            timestamps.before_user_execution = micros
         elif name == "AFTER_USER_EXECUTION":
             timestamps.after_user_execution = micros
     
@@ -194,7 +194,7 @@ def collect_data(num_runs: int) -> BenchmarkResults:
         if poc_ts:
             results.poc_runs.append(poc_ts)
             print(f"    PoC: setup={poc_ts.user_space_setup_complete}μs, "
-                  f"exec={poc_ts.after_user_execution - poc_ts.before_user_execution}μs, "
+                  f"exec={poc_ts.after_user_execution - poc_ts.ap_boot_complete}μs, "
                   f"total={poc_ts.after_user_execution}μs")
         
         # Run Dandelion
@@ -242,9 +242,13 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
     dandelion_exec = [ts.engine_exec_end - ts.engine_setup_end for ts in results.dandelion_runs]
     dandelion_total = [ts.engine_exec_end - ts.engine_start for ts in results.dandelion_runs]
     
-    # PoC
-    poc_setup = [ts.user_space_setup_complete for ts in results.poc_runs]
-    poc_exec = [ts.after_user_execution - ts.before_user_execution for ts in results.poc_runs]
+    # PoC - Setup Critical Path = UserSpaceSetup + (PatchingUserSpace - UserTrampolineSetupComplete)
+    poc_setup = [
+        ts.user_space_setup_complete + (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
+        for ts in results.poc_runs
+    ]
+    # Execution time = AfterUserExecution - ApBootComplete
+    poc_exec = [ts.after_user_execution - ts.ap_boot_complete for ts in results.poc_runs]
     poc_total = [ts.after_user_execution for ts in results.poc_runs]
     
     colors = {'dandelion': '#2ecc71', 'poc': '#3498db'}
@@ -268,7 +272,7 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
     bp2['boxes'][0].set_facecolor(colors['dandelion'])
     bp2['boxes'][1].set_facecolor(colors['poc'])
     ax2.set_ylabel('Time (μs)')
-    ax2.set_title('Setup Time')
+    ax2.set_title('Setup Critical Path')
     ax2.grid(True, alpha=0.3)
     
     # Plot 3: Execution Time
@@ -305,57 +309,42 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
 def create_detailed_plot(results: BenchmarkResults, output_path: str):
     """Create the second plot: PoC detailed timing breakdown"""
     
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
     fig.suptitle('Unikraft PoC Stage Timings', fontsize=14, fontweight='bold')
     
     # Prepare data - compute deltas between stages
-    user_space_setup = [ts.user_space_setup_complete for ts in results.poc_runs]
-    
-    trampoline_setup = [
+    # User Trampoline Setup = UserTrampolineSetupComplete - UserSpaceSetupComplete
+    user_trampoline_setup = [
         ts.user_trampoline_setup_complete - ts.user_space_setup_complete 
         for ts in results.poc_runs
     ]
     
+    # Boot Trampoline Setup = BootTrampolineSetupComplete - PatchingUserSpaceComplete
     boot_trampoline_setup = [
-        ts.boot_trampoline_setup_complete - ts.user_trampoline_setup_complete
+        ts.boot_trampoline_setup_complete - ts.patching_user_space_complete
         for ts in results.poc_runs
     ]
     
+    # AP Boot = ApBootComplete - BootTrampolineSetupComplete
     ap_boot = [
         ts.ap_boot_complete - ts.boot_trampoline_setup_complete
         for ts in results.poc_runs
     ]
     
-    exec_setup = [
-        ts.before_user_execution - ts.ap_boot_complete
-        for ts in results.poc_runs
-    ]
-    
-    user_execution = [
-        ts.after_user_execution - ts.before_user_execution
-        for ts in results.poc_runs
-    ]
-    
     # All data for boxplot
     all_data = [
-        user_space_setup,
-        trampoline_setup,
+        user_trampoline_setup,
         boot_trampoline_setup,
         ap_boot,
-        exec_setup,
-        user_execution
     ]
     
     labels = [
-        'User Space\nSetup',
         'User Trampoline\nSetup',
         'Boot Trampoline\nSetup',
         'AP Boot',
-        'AP Setup',
-        'User Execution'
     ]
     
-    colors = ['#e74c3c', '#e67e22', '#f39c12', '#27ae60', '#3498db', '#9b59b6']
+    colors = ['#e67e22', '#f39c12', '#27ae60']
     
     bp = ax.boxplot(all_data, labels=labels, patch_artist=True)
     
@@ -396,8 +385,13 @@ def print_summary(results: BenchmarkResults):
     if results.poc_runs:
         print("\n--- PoC Statistics (μs) ---")
         poc_total = [ts.after_user_execution for ts in results.poc_runs]
-        poc_setup = [ts.user_space_setup_complete for ts in results.poc_runs]
-        poc_exec = [ts.after_user_execution - ts.before_user_execution for ts in results.poc_runs]
+        # Setup Critical Path = UserSpaceSetup + (PatchingUserSpace - UserTrampolineSetupComplete)
+        poc_setup = [
+            ts.user_space_setup_complete + (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
+            for ts in results.poc_runs
+        ]
+        # Execution time = AfterUserExecution - ApBootComplete
+        poc_exec = [ts.after_user_execution - ts.ap_boot_complete for ts in results.poc_runs]
         
         print(f"  Total runtime:  mean={statistics.mean(poc_total):.0f}, "
               f"min={min(poc_total)}, max={max(poc_total)}")
@@ -452,7 +446,7 @@ def main():
             if poc_ts:
                 results.poc_runs.append(poc_ts)
                 print(f"    PoC: setup={poc_ts.user_space_setup_complete}μs, "
-                      f"exec={poc_ts.after_user_execution - poc_ts.before_user_execution}μs")
+                      f"exec={poc_ts.after_user_execution - poc_ts.ap_boot_complete}μs")
         
         if not args.poc_only:
             dandelion_ts = run_dandelion_benchmark()
