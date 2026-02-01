@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Global start time (initialized when first timer is created)
 static START_TIME: AtomicU64 = AtomicU64::new(0);
-const CPU_MHZ: u64 = 2100; // Assume 2.1 GHz for conversion (adjust as needed)
+const CPU_MHZ: f64 = 2304.009; // We read the TSC at 2304.009 MHz from outside QEMU
 
 /// Maximum number of timestamps we can store
 const MAX_TIMESTAMPS: usize = 16;
@@ -133,7 +133,7 @@ pub fn print_bsp_timestamps() {
     for i in 0..count {
         let cycles = BSP_TIMESTAMPS[i].load(Ordering::Relaxed);
         let point_val = BSP_TIMEPOINTS[i].load(Ordering::Relaxed);
-        let micros = cycles / CPU_MHZ;
+        let micros = ((cycles as f64) / CPU_MHZ) as u64;
 
         if let Some(point) = TimePoint::from_u64(point_val) {
             println!(
@@ -153,7 +153,7 @@ pub fn print_ap_timestamps() {
     for i in 0..count {
         let cycles = AP_TIMESTAMPS[i].load(Ordering::Relaxed);
         let point_val = AP_TIMEPOINTS[i].load(Ordering::Relaxed);
-        let micros = cycles / CPU_MHZ;
+        let micros = ((cycles as f64) / CPU_MHZ) as u64;
 
         if let Some(point) = TimePoint::from_u64(point_val) {
             crate::ap_println!(
