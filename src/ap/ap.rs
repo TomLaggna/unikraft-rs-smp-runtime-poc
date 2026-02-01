@@ -2,7 +2,7 @@
 use crate::ap_println; // Macro is exported to crate root
 use crate::boot_trampoline_bindings;
 use crate::cpu_startup::x2apic_enable;
-use crate::timing::{record_and_print_ap, TimePoint};
+use crate::timing::{print_ap_timestamps, record_ap, TimePoint};
 use crate::ApTaskInfo;
 use core::arch::asm;
 use core::ptr;
@@ -39,7 +39,7 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         setup_exception_handlers();
 
         // Record timestamp: AP boot complete
-        record_and_print_ap(TimePoint::ApBootComplete);
+        record_ap(TimePoint::ApBootComplete);
 
         // Read task info from shared memory
         let task_info_ptr = cpu.task_info_ptr as *const ApTaskInfo;
@@ -64,7 +64,7 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         // Mark task as running
         task_info.write_status(1);
         // Record timestamp: Before user execution
-        record_and_print_ap(TimePoint::BeforeUserExecution);
+        record_ap(TimePoint::BeforeUserExecution);
 
         // Execute user code via K->U trampoline
         // NOTE: GDT/IDT/TSS are NOT loaded here - the trampoline will load them
@@ -92,7 +92,7 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         trampoline_fn();
 
         // Record timestamp: After user execution
-        record_and_print_ap(TimePoint::AfterUserExecution);
+        record_ap(TimePoint::AfterUserExecution);
 
         // Mark task as done
         // TODO removing the debugging code seems to have caused some bug

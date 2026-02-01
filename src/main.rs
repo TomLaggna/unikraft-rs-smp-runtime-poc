@@ -41,7 +41,7 @@ use core::ptr;
 use cpu_startup::*;
 use elfloader::elf_parser::ParsedElf;
 use std::fs;
-use timing::{init_timer, record_and_print, TimePoint};
+use timing::{init_timer, print_all_timestamps, record, TimePoint};
 use user_pagetable::{virt_to_phys, walk_pt, walk_pt_with_flags};
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
@@ -339,7 +339,7 @@ fn main() {
         }
     };
 
-    record_and_print(TimePoint::UserSpaceSetupComplete);
+    record(TimePoint::UserSpaceSetupComplete);
 
     // ========================================================================
     // Setup Trampolines and Patch Handlers:
@@ -392,11 +392,6 @@ fn main() {
         }
     }
 
-    // Map trampolines in user page tables
-    if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
-        panic!("Failed to map trampolines in user space: {}", e);
-    }
-
     // Copy K->U trampoline code to page 1
     unsafe {
         let k2u_code = trampolines::get_k2u_code();
@@ -411,6 +406,17 @@ fn main() {
         // Copy code
         let dst = high_va_page2 as *mut u8;
         core::ptr::copy_nonoverlapping(u2k_code.as_ptr(), dst, u2k_code.len());
+    }
+
+    // Allocate shared memory for AP task info in static storage (not heap)
+    // Static variables are in the data segment and accessible by APs
+    static mut AP_TASK_INFO: ApTaskInfo = ApTaskInfo::new();
+
+    record(TimePoint::UserTrampolineSetupComplete);
+
+    // Map trampolines in user page tables
+    if let Err(e) = user_space.map_trampolines(high_va_page1, page1_pa, page2_pa) {
+        panic!("Failed to map trampolines in user space: {}", e);
     }
 
     // Patch the trampoline address into INT 32 handler
@@ -496,10 +502,6 @@ fn main() {
         core::arch::asm!("invlpg [{}]", in(reg) high_va_page1, options(nostack));
         core::arch::asm!("invlpg [{}]", in(reg) high_va_page2, options(nostack));
     }
-
-    // Allocate shared memory for AP task info in static storage (not heap)
-    // Static variables are in the data segment and accessible by APs
-    static mut AP_TASK_INFO: ApTaskInfo = ApTaskInfo::new();
     unsafe {
         // Write user space CR3 to AP task info so AP can load user page tables
         AP_TASK_INFO.write_user_cr3(user_space.get_cr3());
@@ -523,7 +525,7 @@ fn main() {
     let task_info_ptr = unsafe { &raw const AP_TASK_INFO as *const ApTaskInfo as u64 };
 
     // Record timestamp: User space memory setup complete
-    record_and_print(TimePoint::UserTrampolineSetupComplete);
+    record(TimePoint::PatchingUserSpaceComplete);
 
     // Step 3: Get number of CPUs from ACPI (simplified - assumes 2 CPUs)
     // For debugging, only start 1 AP
@@ -563,7 +565,7 @@ fn main() {
             }
         }
 
-        record_and_print(TimePoint::BootTrampolineSetupComplete);
+        record(TimePoint::BootTrampolineSetupComplete);
 
         // Step 1: Enable x2APIC on BSP
         unsafe {
@@ -632,6 +634,9 @@ fn main() {
             }
         }
     }
+
+    // Print all collected timestamps now that execution is complete
+    print_all_timestamps();
 
     // Main completes - the kernel will take over
     println!("\n=== Main boot sequence complete! ===");
