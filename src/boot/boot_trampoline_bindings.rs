@@ -109,12 +109,6 @@ impl BootTrampoline {
     pub unsafe fn copy_to_target(&self) -> Result<(), &'static str> {
         let dst = self.target_addr as *mut u8;
 
-        println!(
-            "Copying {} bytes of trampoline blob to 0x{:x}",
-            TRAMPOLINE_BLOB.len(),
-            self.target_addr
-        );
-
         // Check if target is writable (simple test)
         let test_ptr = dst as *mut u32;
         if test_ptr.is_null() {
@@ -124,10 +118,6 @@ impl BootTrampoline {
         // Copy the entire trampoline blob
         ptr::copy_nonoverlapping(TRAMPOLINE_BLOB.as_ptr(), dst, TRAMPOLINE_BLOB.len());
 
-        println!(
-            "✓ Trampoline copied successfully ({} bytes)",
-            TRAMPOLINE_BLOB.len()
-        );
         Ok(())
     }
 
@@ -139,16 +129,9 @@ impl BootTrampoline {
     /// # Arguments
     /// * `pml4_addr` - Physical address of PML4 (page table root)
     pub unsafe fn set_page_table(&self, pml4_addr: u64) {
-        println!("Setting page table address to 0x{:x}", pml4_addr);
-
         // Patch the copied blob at target address
         let target_ptr = (self.target_addr as usize + OFFSET_X86_BPT_PML4_ADDR) as *mut u32;
         ptr::write_volatile(target_ptr, pml4_addr as u32);
-
-        println!(
-            "✓ Page table address set at offset 0x{:x}",
-            OFFSET_X86_BPT_PML4_ADDR
-        );
     }
 
     /// Initialize a CPU's data structure
@@ -174,11 +157,6 @@ impl BootTrampoline {
             return Err("CPU index out of range");
         }
 
-        println!(
-            "Initializing CPU {}: APIC ID={}, entry=0x{:x}, stack=0x{:x}, task_info=0x{:x}",
-            cpu_idx, apic_id, entry_fn, stack_ptr, task_info_ptr
-        );
-
         // Patch the CPU data structure in the copied blob
         let target_offset = OFFSET_LCPUS + (cpu_idx as usize * 64);
         let target_cpu_ptr = (self.target_addr as usize + target_offset) as *mut CpuData;
@@ -186,23 +164,6 @@ impl BootTrampoline {
         let cpu_data = CpuData::init(cpu_idx, apic_id, entry_fn, stack_ptr, task_info_ptr);
         ptr::write_volatile(target_cpu_ptr, cpu_data);
 
-        println!(
-            "✓ CPU {} initialized at offset 0x{:x}",
-            cpu_idx, target_offset
-        );
-        Ok(())
-    }
-
-    /// Apply relocations to the copied trampoline
-    ///
-    /// NOT NEEDED! Since we build the trampoline with base address 0x8000,
-    /// the linker calculates all internal addresses for us at compile time.
-    /// No runtime patching required!
-    pub unsafe fn apply_relocations(&self) -> Result<(), &'static str> {
-        println!(
-            "✓ No relocations needed (trampoline built for 0x{:x})",
-            self.target_addr
-        );
         Ok(())
     }
 

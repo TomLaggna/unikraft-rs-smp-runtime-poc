@@ -50,10 +50,8 @@ pub enum TimePoint {
     BootTrampolineSetupComplete = 3,
     /// AP: After AP has booted and initialized
     ApBootComplete = 4,
-    /// AP: Before AP executes user function
-    BeforeUserExecution = 5,
     /// AP: After AP executes user function
-    AfterUserExecution = 6,
+    AfterUserExecution = 5,
 }
 
 impl TimePoint {
@@ -64,7 +62,6 @@ impl TimePoint {
             TimePoint::PatchingUserSpaceComplete => "PATCHING_USER_SPACE_COMPLETE",
             TimePoint::BootTrampolineSetupComplete => "BOOT_TRAMPOLINE_SETUP_COMPLETE",
             TimePoint::ApBootComplete => "AP_BOOT_COMPLETE",
-            TimePoint::BeforeUserExecution => "BEFORE_USER_EXECUTION",
             TimePoint::AfterUserExecution => "AFTER_USER_EXECUTION",
         }
     }
@@ -76,8 +73,7 @@ impl TimePoint {
             2 => Some(TimePoint::PatchingUserSpaceComplete),
             3 => Some(TimePoint::BootTrampolineSetupComplete),
             4 => Some(TimePoint::ApBootComplete),
-            5 => Some(TimePoint::BeforeUserExecution),
-            6 => Some(TimePoint::AfterUserExecution),
+            5 => Some(TimePoint::AfterUserExecution),
             _ => None,
         }
     }

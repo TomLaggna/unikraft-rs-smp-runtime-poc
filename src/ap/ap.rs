@@ -25,16 +25,6 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         let state_ptr = &raw const cpu.state as *mut i32;
         ptr::write_volatile(state_ptr, 2); // LCPU_STATE_IDLE
 
-        // Initialize Rust runtime for this AP (TLS, etc.)
-        let tlsp = match ap_runtime_init() {
-            Ok(tls_ptr) => tls_ptr,
-            Err(e) => {
-                ap_println!("Failed to initialize runtime: {}", e);
-                loop {
-                    asm!("hlt");
-                }
-            }
-        };
         // Set up minimal exception handlers to catch ELF crashes
         setup_exception_handlers();
 
@@ -64,7 +54,6 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         // Mark task as running
         task_info.write_status(1);
         // Record timestamp: Before user execution
-        record_ap(TimePoint::BeforeUserExecution);
 
         // Execute user code via K->U trampoline
         // NOTE: GDT/IDT/TSS are NOT loaded here - the trampoline will load them
@@ -104,68 +93,6 @@ pub extern "C" fn ap_entry(cpu_data: *const boot_trampoline_bindings::CpuData) -
         loop {
             asm!("hlt");
         }
-    }
-}
-
-/// Initialize Rust runtime for AP (mainly TLS setup)
-pub fn ap_runtime_init() -> Result<usize, i32> {
-    // TLS symbols from linker
-    extern "C" {
-        static _tls_start: u8;
-        static _etdata: u8;
-        static _tls_end: u8;
-    }
-
-    unsafe {
-        let tls_start = &_tls_start as *const u8 as usize;
-        let etdata = &_etdata as *const u8 as usize;
-        let tls_end = &_tls_end as *const u8 as usize;
-
-        let tdata_len = etdata - tls_start;
-        let tbss_len = tls_end - etdata;
-
-        // Calculate TLS area size (same as Unikraft's ukarch_tls_area_size)
-        // x86_64: TLS data + padding + TCB (8 bytes for self-pointer)
-        let tls_data_size = tdata_len + tbss_len;
-        let tls_data_aligned = (tls_data_size + 7) & !7; // align to 8
-        let tcb_size = 8; // Just the self-pointer for minimal TCB
-        let tls_total_size = tls_data_aligned + tcb_size;
-
-        // Allocate TLS area (32-byte aligned for x86_64)
-        let tls_area = alloc_aligned(tls_total_size, 32)?;
-
-        // Calculate TLS pointer (points to TCB, which is at the end)
-        let tlsp = tls_area + tls_total_size - tcb_size;
-
-        // Initialize TLS area:
-        // 1. Copy .tdata section
-        core::ptr::copy_nonoverlapping(tls_start as *const u8, tls_area as *mut u8, tdata_len);
-
-        // 2. Zero .tbss section
-        core::ptr::write_bytes((tls_area + tdata_len) as *mut u8, 0, tbss_len);
-
-        // 3. Zero padding
-        if tls_data_aligned > tls_data_size {
-            core::ptr::write_bytes(
-                (tls_area + tdata_len + tbss_len) as *mut u8,
-                0,
-                tls_data_aligned - tls_data_size,
-            );
-        }
-
-        // 4. Set up TCB self-pointer (required by x86_64 TLS ABI)
-        *(tlsp as *mut usize) = tlsp;
-
-        // 5. Set FS base register to point to TLS
-        core::arch::asm!(
-            "wrfsbase {0}",
-            in(reg) tlsp,
-            options(nostack, preserves_flags)
-        );
-
-        ap_println!("TLS initialized at 0x{:016x}", tlsp);
-
-        Ok(tlsp)
     }
 }
 
@@ -235,47 +162,12 @@ struct IdtDescriptor {
     base: u64,
 }
 
-/// Task State Segment (TSS) for x86_64
-/// Used for stack switching when transitioning privilege levels (ring 3 -> ring 0)
-#[repr(C, packed)]
-struct Tss {
-    _reserved1: u32,
-    rsp0: u64, // Stack pointer for ring 0 (kernel)
-    rsp1: u64, // Stack pointer for ring 1 (unused)
-    rsp2: u64, // Stack pointer for ring 2 (unused)
-    _reserved2: u64,
-    ist: [u64; 7], // Interrupt Stack Table
-    _reserved3: u64,
-    _reserved4: u16,
-    iomap_base: u16, // I/O Map Base Address
-}
-
 static mut AP_IDT: [IdtEntry; 33] = [IdtEntry::new(); 33];
-
-// Static TSS for stack switching during ring transitions
-static mut AP_TSS: Tss = Tss {
-    _reserved1: 0,
-    rsp0: 0,
-    rsp1: 0,
-    rsp2: 0,
-    _reserved2: 0,
-    ist: [0; 7],
-    _reserved3: 0,
-    _reserved4: 0,
-    iomap_base: 104, // Size of TSS
-};
 
 unsafe fn setup_exception_handlers() {
     // Get current stack pointer for kernel stack (RSP0)
     let kernel_stack: u64;
     asm!("mov {}, rsp", out(reg) kernel_stack);
-
-    // Initialize TSS with kernel stack
-    AP_TSS.rsp0 = kernel_stack;
-    ap_println!("TSS RSP0 set to: 0x{:016x}", kernel_stack);
-
-    // Setup TSS descriptor in GDT
-    setup_tss_descriptor();
 
     // Set up handlers for common exceptions (DPL=0, kernel only)
     AP_IDT[0].set_handler(exception_handler_0, 0); // Divide by zero
@@ -303,54 +195,6 @@ unsafe fn setup_exception_handlers() {
     };
 
     asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
-
-    // Verify IDT was loaded
-    let mut loaded_desc = IdtDescriptor { limit: 0, base: 0 };
-    asm!("sidt [{}]", in(reg) &mut loaded_desc, options(nostack, preserves_flags));
-
-    // Copy packed struct fields to avoid unaligned reference
-    let base = loaded_desc.base;
-    let limit = loaded_desc.limit;
-    ap_println!("IDT loaded at: 0x{:016x} limit: {}", base, limit);
-
-    // Load TSS using LTR instruction
-    let tss_selector = boot_trampoline_bindings::GDT_SEL_TSS;
-    asm!("ltr {0:x}", in(reg) tss_selector, options(nostack, preserves_flags));
-    ap_println!("TSS loaded with selector: 0x{:04x}", tss_selector);
-}
-
-/// Setup TSS descriptor in the GDT
-/// TSS descriptor is 16 bytes in 64-bit mode (occupies 2 GDT entries)
-unsafe fn setup_tss_descriptor() {
-    let tss_base = &AP_TSS as *const Tss as u64;
-    let tss_limit = (core::mem::size_of::<Tss>() - 1) as u64;
-
-    // Get GDT base address
-    let mut gdt_desc = IdtDescriptor { limit: 0, base: 0 };
-    asm!("sgdt [{}]", in(reg) &mut gdt_desc, options(nostack, preserves_flags));
-
-    // TSS descriptor is at index 5 (offset 0x28)
-    let tss_desc_ptr = (gdt_desc.base + 0x28) as *mut u64;
-
-    // Build TSS descriptor (16 bytes = 2 u64 entries)
-    // Low qword: limit[15:0] | base[15:0] | base[23:16] | type=0x89 | limit[19:16] | base[31:24]
-    let low = (tss_limit & 0xFFFF)
-        | ((tss_base & 0xFFFF) << 16)
-        | ((tss_base & 0xFF0000) << 32)
-        | (0x89u64 << 40)  // Type: Available 64-bit TSS, Present
-        | (((tss_limit >> 16) & 0xF) << 48)
-        | ((tss_base & 0xFF000000) << 32);
-
-    // High qword: base[63:32] | reserved
-    let high = tss_base >> 32;
-
-    ptr::write_volatile(tss_desc_ptr, low);
-    ptr::write_volatile(tss_desc_ptr.offset(1), high);
-
-    ap_println!(
-        "TSS descriptor set at GDT+0x28, TSS base: 0x{:016x}",
-        tss_base
-    );
 }
 
 #[no_mangle]
