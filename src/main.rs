@@ -208,8 +208,8 @@ fn main() {
     // - copy and map user code
     // ========================================================================
 
-    // Create a 32 MB user address space (reduced for 1GB RAM system)
-    const USER_SPACE_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+    // Match Dandelion context size: 0x802_0000 = 128MB + 128KB
+    const USER_SPACE_SIZE: usize = 0x802_0000; // ~134 MB (same as Dandelion)
     let mut user_space = unsafe {
         match user_pagetable::UserSpaceManager::new(USER_SPACE_SIZE) {
             Ok(us) => us,
@@ -223,8 +223,9 @@ fn main() {
     let user_code_asm = unsafe { user_code::get_user_code() };
     let user_code_entry_offset = unsafe { user_code::get_entry_offset() };
 
-    // Allocate 64KB + 4KB for user code in kernel space (extra for alignment)
-    let user_code_size = 64 * 1024;
+    // Allocate 24KB for user code buffer to match Dandelion ELF size (~23KB)
+    // This ensures we exercise the same page table mapping overhead
+    let user_code_size = 24 * 1024; // 24KB = 6 pages (matches ELF size)
     let user_code_buf_raw = vec![0u8; user_code_size + 4096];
 
     // Page-align the buffer pointer
