@@ -13,10 +13,6 @@
 use core::arch::asm;
 use core::ptr;
 use core::slice;
-
-// Import debug macros
-use crate::{debug_ap_println, debug_mem_println, debug_trampoline_println};
-
 /// Page table entry flags
 const PDE64_PRESENT: u64 = 1 << 0;
 const PDE64_RW: u64 = 1 << 1;
@@ -81,98 +77,6 @@ impl InterruptConfig {
             interrupt_stack: aligned_base + manager.get_interrupt_stack_top() as u64,
         }
     }
-
-    /// Load this configuration into CPU registers
-    ///
-    /// # Safety
-    /// Must be called with valid addresses that are mapped in current page tables
-    pub unsafe fn load_into_cpu(&self) {
-        use core::arch::asm;
-
-        // Load GDT
-        let gdt_desc = [
-            self.gdt_limit,
-            (self.gdt_base & 0xFFFF) as u16,
-            ((self.gdt_base >> 16) & 0xFFFF) as u16,
-            ((self.gdt_base >> 32) & 0xFFFF) as u16,
-            ((self.gdt_base >> 48) & 0xFFFF) as u16,
-        ];
-        asm!("lgdt [{}]", in(reg) &gdt_desc, options(readonly, nostack, preserves_flags));
-
-        // Load IDT
-        let idt_desc = [
-            self.idt_limit,
-            (self.idt_base & 0xFFFF) as u16,
-            ((self.idt_base >> 16) & 0xFFFF) as u16,
-            ((self.idt_base >> 32) & 0xFFFF) as u16,
-            ((self.idt_base >> 48) & 0xFFFF) as u16,
-        ];
-        asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
-
-        // Load TSS
-        asm!("ltr {0:x}", in(reg) self.tss_selector, options(nostack, preserves_flags));
-    }
-}
-
-/// Walk page tables to translate virtual address to physical address
-/// Returns (physical_address, pte_entry) so caller can check flags
-pub unsafe fn walk_pt_with_flags(cr3: u64, va: u64) -> Result<(u64, u64), &'static str> {
-    const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-    const DIRECTMAP_START: u64 = 0xffffff8000000000;
-
-    let pml4_idx = (va >> 39) & 0x1FF;
-    let pdpt_idx = (va >> 30) & 0x1FF;
-    let pd_idx = (va >> 21) & 0x1FF;
-    let pt_idx = (va >> 12) & 0x1FF;
-    let offset = va & 0xFFF;
-
-    let pml4_phys = cr3 & PTE_ADDR_MASK;
-    let pml4_virt = (pml4_phys + DIRECTMAP_START) as *const u64;
-    let pml4e = core::ptr::read_volatile(pml4_virt.add(pml4_idx as usize));
-
-    if (pml4e & 1) == 0 {
-        return Err("PML4 entry not present");
-    }
-
-    let pdpt_phys = pml4e & PTE_ADDR_MASK;
-    let pdpt_virt = (pdpt_phys + DIRECTMAP_START) as *const u64;
-    let pdpte = core::ptr::read_volatile(pdpt_virt.add(pdpt_idx as usize));
-
-    if (pdpte & 1) == 0 {
-        return Err("PDPT entry not present");
-    }
-
-    let pd_phys = pdpte & PTE_ADDR_MASK;
-    let pd_virt = (pd_phys + DIRECTMAP_START) as *const u64;
-    let pde = core::ptr::read_volatile(pd_virt.add(pd_idx as usize));
-
-    if (pde & 1) == 0 {
-        return Err("PD entry not present");
-    }
-
-    // Check if it's a 2MB huge page
-    if (pde & 0x80) != 0 {
-        let page_pa = pde & PTE_ADDR_MASK;
-        let offset_2mb = va & 0x1F_FFFF; // 2MB offset
-        return Ok((page_pa | offset_2mb, pde));
-    }
-
-    let pt_phys = pde & PTE_ADDR_MASK;
-    let pt_virt = (pt_phys + DIRECTMAP_START) as *const u64;
-    let pte = core::ptr::read_volatile(pt_virt.add(pt_idx as usize));
-
-    if (pte & 1) == 0 {
-        return Err("PT entry not present");
-    }
-
-    let page_phys = pte & PTE_ADDR_MASK;
-    Ok((page_phys | offset, pte))
-}
-
-/// Walk page tables to translate virtual address to physical address
-/// Panics if any level is not present, returns PA if successfully walked
-pub unsafe fn walk_pt(cr3: u64, va: u64) -> Result<u64, &'static str> {
-    walk_pt_with_flags(cr3, va).map(|(pa, _)| pa)
 }
 
 /// Walk kernel page tables to translate virtual → physical
@@ -200,18 +104,14 @@ pub unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     // Walk PML4
     let pml4 = (DIRECTMAP_START + pml4_phys) as *const u64;
     let pml4_entry = ptr::read_volatile(pml4.add(pml4_idx as usize));
-    // debug_mem_println!("  PML4[{}] = 0x{:016x}", pml4_idx, pml4_entry);
     if pml4_entry & 1 == 0 {
-        debug_mem_println!("  PML4 entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
 
     // Walk PDPT
     let pdpt = (DIRECTMAP_START + (pml4_entry & !0xFFF)) as *const u64;
     let pdpt_entry = ptr::read_volatile(pdpt.add(pdpt_idx as usize));
-    // debug_mem_println!("  PDPT[{}] = 0x{:016x}", pdpt_idx, pdpt_entry);
     if pdpt_entry & 1 == 0 {
-        debug_mem_println!("  PDPT entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
     if pdpt_entry & (1 << 7) != 0 {
@@ -223,9 +123,7 @@ pub unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     // Walk PD
     let pd = (DIRECTMAP_START + (pdpt_entry & !0xFFF)) as *const u64;
     let pd_entry = ptr::read_volatile(pd.add(pd_idx as usize));
-    // debug_mem_println!("  PD[{}] = 0x{:016x}", pd_idx, pd_entry);
     if pd_entry & 1 == 0 {
-        debug_mem_println!("  PD entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
     if pd_entry & (1 << 7) != 0 {
@@ -238,16 +136,13 @@ pub unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
     // Walk PT
     let pt = (DIRECTMAP_START + (pd_entry & !0xFFF)) as *const u64;
     let pt_entry = ptr::read_volatile(pt.add(pt_idx as usize));
-    // debug_mem_println!("  PT[{}] = 0x{:016x}", pt_idx, pt_entry);
     if pt_entry & 1 == 0 {
-        debug_mem_println!("  PT entry not present! virt_addr 0x{:016x}", virt_addr);
         return None;
     }
 
     // Return page frame + offset (full physical address)
     let phys_frame = pt_entry & 0x000F_FFFF_FFFF_F000; // Extract page frame, mask out flags
     let result = phys_frame + offset;
-    // debug_mem_println!("  Result: phys=0x{:016x}", result);
     Some(result)
 }
 
@@ -494,22 +389,11 @@ impl UserSpaceManager {
         if guest_mem_kva & (PAGE_SIZE as u64 - 1) != 0 {
             return Err("guest_mem is not page-aligned in virtual address space!");
         }
-        debug_mem_println!(
-            "  guest_mem at KVA 0x{:016x} (page-aligned ✓)",
-            guest_mem_kva
-        );
 
         // Force kernel to map all pages FIRST (one write per page is sufficient)
         // This ensures virt_to_phys() will work on all addresses
         for page in 0..(total_size / PAGE_SIZE) {
             guest_mem[page * PAGE_SIZE] = 0; // Touch first byte of each page
-        }
-
-        // NOW check physical alignment (after pages are mapped)
-        let guest_mem_pa_check = virt_to_phys(guest_mem_kva)
-            .ok_or("Failed to translate guest_mem base to physical address")?;
-        if guest_mem_pa_check & (PAGE_SIZE as u64 - 1) != 0 {
-            return Err("guest_mem is not page-aligned in PHYSICAL address space!");
         }
 
         // ==================================================================
@@ -617,7 +501,6 @@ impl UserSpaceManager {
 
         // Validate P4 physical address is page-aligned
         if p4_pa_raw & PAGE_MASK != 0 {
-            debug_mem_println!("  ERROR: P4 PA 0x{:016x} is NOT page-aligned!", p4_pa_raw);
             return Err("P4 table is not page-aligned in physical memory! This will break CR3.");
         }
         let p4_pa = p4_pa_raw & PTE_ADDR_MASK;
@@ -625,7 +508,6 @@ impl UserSpaceManager {
         let p3_kva = guest_mem_base_kva + p3_offset as u64;
         let p3_pa_raw = virt_to_phys(p3_kva).ok_or("Failed to translate P3 KVA to physical")?;
         if p3_pa_raw & PAGE_MASK != 0 {
-            debug_mem_println!("  ERROR: P3 PA 0x{:016x} is NOT page-aligned!", p3_pa_raw);
             return Err("P3 table is not page-aligned in physical memory!");
         }
         let p3_pa = p3_pa_raw & PTE_ADDR_MASK;
@@ -637,10 +519,6 @@ impl UserSpaceManager {
         let tramp_p3_pa_raw = virt_to_phys(tramp_p3_kva)
             .ok_or("Failed to translate trampoline P3 KVA to physical")?;
         if tramp_p3_pa_raw & PAGE_MASK != 0 {
-            debug_mem_println!(
-                "  ERROR: Trampoline P3 PA 0x{:016x} is NOT page-aligned!",
-                tramp_p3_pa_raw
-            );
             return Err("Trampoline P3 is not page-aligned in physical memory!");
         }
         let trampoline_p3_pa = tramp_p3_pa_raw & PTE_ADDR_MASK;
@@ -649,10 +527,6 @@ impl UserSpaceManager {
         let tramp_p2_pa_raw = virt_to_phys(tramp_p2_kva)
             .ok_or("Failed to translate trampoline P2 KVA to physical")?;
         if tramp_p2_pa_raw & PAGE_MASK != 0 {
-            debug_mem_println!(
-                "  ERROR: Trampoline P2 PA 0x{:016x} is NOT page-aligned!",
-                tramp_p2_pa_raw
-            );
             return Err("Trampoline P2 is not page-aligned in physical memory!");
         }
         let trampoline_p2_pa = tramp_p2_pa_raw & PTE_ADDR_MASK;
@@ -661,10 +535,6 @@ impl UserSpaceManager {
         let tramp_p1_pa_raw = virt_to_phys(tramp_p1_kva)
             .ok_or("Failed to translate trampoline P1 KVA to physical")?;
         if tramp_p1_pa_raw & PAGE_MASK != 0 {
-            debug_mem_println!(
-                "  ERROR: Trampoline P1 PA 0x{:016x} is NOT page-aligned!",
-                tramp_p1_pa_raw
-            );
             return Err("Trampoline P1 is not page-aligned in physical memory!");
         }
         let trampoline_p1_pa = tramp_p1_pa_raw & PTE_ADDR_MASK;

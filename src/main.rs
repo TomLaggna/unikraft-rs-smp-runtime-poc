@@ -19,12 +19,6 @@ mod trampolines;
 mod user_code;
 mod user_handlers;
 mod user_pagetable;
-
-// Debug utilities module
-#[macro_use]
-mod debug_utils;
-use debug_utils::*;
-
 // Boot trampoline is in src/boot/ directory
 #[path = "boot/boot_trampoline_bindings.rs"]
 mod boot_trampoline_bindings;
@@ -39,10 +33,7 @@ use boot_trampoline_bindings::BootTrampoline;
 use core::arch::asm;
 use core::ptr;
 use cpu_startup::*;
-use elfloader::elf_parser::ParsedElf;
-use std::fs;
 use timing::{init_timer, print_all_timestamps, record, TimePoint};
-use user_pagetable::{virt_to_phys, walk_pt, walk_pt_with_flags};
 
 // Unikraft direct-map region (physical memory mapped at high virtual addresses)
 const DIRECTMAP_AREA_START: u64 = 0xffffff8000000000; // -512 GiB
@@ -133,15 +124,8 @@ unsafe fn map_page_in_kernel_pt(cr3: u64, va: u64, pa: u64) -> Result<(), &'stat
         ptr::write_volatile(pml4e_ptr, pml4e);
         pdpt_pa
     } else {
-        // LOG EXISTING ENTRY
-        // debug_mem_println!("DEBUG MAP: PML4[{}] existing: 0x{:016x}", pml4_idx, pml4e);
         // Force clear NX bit if present
         if (pml4e & PTE_NX) != 0 {
-            debug_mem_println!(
-                "DEBUG MAP: Clearing NX on PML4[{}] (was 0x{:016x})",
-                pml4_idx,
-                pml4e
-            );
             pml4e &= !PTE_NX;
             ptr::write_volatile(pml4e_ptr, pml4e);
         }
@@ -422,11 +406,6 @@ fn main() {
     // Patch the trampoline address into INT 32 handler
     unsafe {
         let trampoline_offset = user_handlers::get_handler_32_trampoline_offset();
-        debug_trampoline_println!(
-            "  Trampoline field offset in handler code: 0x{:x}",
-            trampoline_offset
-        );
-
         let handler_code_offset = user_space.get_interrupt_handler_code_address();
         let guest_mem = user_space.get_guest_mem_mut();
         let trampoline_field_offset = handler_code_offset + trampoline_offset;
@@ -437,9 +416,6 @@ fn main() {
 
     // Patch the trampoline data sections with runtime values
     unsafe {
-        // Patch K->U trampoline data fields
-        debug_trampoline_println!("\n  K->U trampoline data:");
-
         // user_cr3_value
         let user_cr3 = user_space.get_cr3();
         let user_cr3_pa = user_cr3 & 0x0000_FFFF_FFFF_F000;
@@ -608,29 +584,29 @@ fn main() {
         }
 
         // Monitor AP task execution
-        debug_ap_println!("\n=== Monitoring AP Task Execution ===");
+        // println!("\n=== Monitoring AP Task Execution ===");
         for retry in 0..200 {
             delay_ms(10);
             let status = AP_TASK_INFO.read_status();
             match status {
                 0 => {
                     if retry % 10 == 0 {
-                        debug_ap_println!("Waiting for AP to start ELF execution...");
+                        // println!("Waiting for AP to start ELF execution...");
                     }
                 }
                 1 => {
-                    // debug_ap_println!("✓ AP is executing ELF...");
+                    // println!!("✓ AP is executing ELF...");
                 }
                 2 => {
-                    debug_ap_println!("✓ AP completed ELF execution!");
+                    // println!("✓ AP completed ELF execution!");
                     break;
                 }
                 _ => {
-                    debug_ap_println!("⚠ Unknown status: {}", status);
+                    // println!("⚠ Unknown status: {}", status);
                 }
             }
             if retry == 199 {
-                println!("⚠ Timeout waiting for AP task completion");
+                // println!("⚠ Timeout waiting for AP task completion");
             }
         }
     }
