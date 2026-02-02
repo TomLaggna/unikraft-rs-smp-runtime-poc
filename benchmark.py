@@ -39,6 +39,10 @@ class PoCTimestamps:
 class DandelionTimestamps:
     """Timestamps from Dandelion benchmark (in microseconds)"""
     engine_start: int = 0
+    buffer_allocation_complete: int = 0
+    user_code_mapping_complete: int = 0
+    user_stack_mapping_complete: int = 0
+    interrupt_setup_complete: int = 0
     engine_setup_end: int = 0
     engine_exec_end: int = 0
 
@@ -165,6 +169,10 @@ def run_dandelion_benchmark() -> Optional[DandelionTimestamps]:
         # Look for lines like: EngineStart: 1856650 cycles (884 μs)
         patterns = [
             (r'EngineStart:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'engine_start'),
+            (r'BufferAllocationComplete:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'buffer_allocation_complete'),
+            (r'UserCodeMappingComplete:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'user_code_mapping_complete'),
+            (r'UserStackMappingComplete:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'user_stack_mapping_complete'),
+            (r'InterruptSetupComplete:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'interrupt_setup_complete'),
             (r'EngineSetupEnd:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'engine_setup_end'),
             (r'EngineExecEnd:\s*\d+\s*cycles\s*\((\d+)\s*μs\)', 'engine_exec_end'),
         ]
@@ -252,7 +260,7 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
     # Dandelion
     dandelion_setup = [ts.engine_setup_end - ts.engine_start for ts in results.dandelion_runs]
     dandelion_exec = [ts.engine_exec_end - ts.engine_setup_end for ts in results.dandelion_runs]
-    dandelion_total = [ts.engine_exec_end - ts.engine_start for ts in results.dandelion_runs]
+    dandelion_critical_path = [dandelion_setup[i] + dandelion_exec[i] for i in range(len(dandelion_setup))]
     
     # PoC - Setup Critical Path = UserSpaceSetup + (PatchingUserSpace - UserTrampolineSetupComplete)
     poc_setup = [
@@ -261,19 +269,19 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
     ]
     # Execution time = AfterUserExecution - ApBootComplete
     poc_exec = [ts.after_user_execution - ts.ap_boot_complete for ts in results.poc_runs]
-    poc_total = [ts.after_user_execution for ts in results.poc_runs]
+    poc_critical_path = [poc_setup[i] + poc_exec[i] for i in range(len(poc_setup))]
     
     colors = {'dandelion': '#2ecc71', 'poc': '#3498db'}
     
-    # Plot 1: Total Runtime
+    # Plot 1: Critical Path (Setup + Execution)
     ax1 = axes[0]
-    bp1 = ax1.boxplot([dandelion_total, poc_total], 
+    bp1 = ax1.boxplot([dandelion_critical_path, poc_critical_path], 
                        labels=['KVM', 'Unikraft'],
                        patch_artist=True)
     bp1['boxes'][0].set_facecolor(colors['dandelion'])
     bp1['boxes'][1].set_facecolor(colors['poc'])
     ax1.set_ylabel('Time (μs)')
-    ax1.set_title('Total Runtime')
+    ax1.set_title('Critical Path (Setup + Execution)')
     ax1.grid(True, alpha=0.3)
     
     # Plot 2: Setup Time
@@ -308,7 +316,7 @@ def create_comparison_plot(results: BenchmarkResults, output_path: str):
                            xytext=(pos + 0.3, mean),
                            fontsize=8, color='red')
     
-    add_stats_annotation(ax1, [dandelion_total, poc_total], [1, 2])
+    add_stats_annotation(ax1, [dandelion_critical_path, poc_critical_path], [1, 2])
     add_stats_annotation(ax2, [dandelion_setup, poc_setup], [1, 2])
     add_stats_annotation(ax3, [dandelion_exec, poc_exec], [1, 2])
     
@@ -322,7 +330,7 @@ def create_detailed_plot(results: BenchmarkResults, output_path: str):
     """Create the second plot: PoC detailed timing breakdown"""
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    fig.suptitle('Unikraft PoC Stage Timings', fontsize=14, fontweight='bold')
+    fig.suptitle('Unikraft PoC One Time Setup Timings', fontsize=14, fontweight='bold')
     
     # Prepare data - compute deltas between stages
     # User Trampoline Setup = UserTrampolineSetupComplete - UserSpaceSetupComplete
@@ -379,6 +387,22 @@ def create_detailed_plot(results: BenchmarkResults, output_path: str):
                        fontsize=9,
                        fontweight='bold')
     
+    # Add total one-time setup annotation
+    total_one_time = [
+        (ts.user_trampoline_setup_complete - ts.user_space_setup_complete) +
+        (ts.boot_trampoline_setup_complete - ts.patching_user_space_complete) +
+        (ts.ap_boot_complete - ts.boot_trampoline_setup_complete)
+        for ts in results.poc_runs
+    ]
+    total_mean = statistics.mean(total_one_time)
+    ax.text(0.02, 0.98, f'Total One-Time Setup: {total_mean:.0f}μs',
+            transform=ax.transAxes,
+            fontsize=11,
+            fontweight='bold',
+            verticalalignment='top',
+            horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Saved detailed plot to: {output_path}")
@@ -413,10 +437,12 @@ def create_setup_breakdown_plot(results: BenchmarkResults, output_path: str):
         for ts in results.poc_runs
     ]
     
-    # Stage 5: Patching (UserTrampolineSetupComplete -> PatchingUserSpaceComplete)
-    # Note: This includes time for patching the user trampoline and interrupt handler
-    patching = [
-        ts.patching_user_space_complete - ts.user_trampoline_setup_complete
+    # Stage 5: Remaining Setup + Patching
+    # This is: (InterruptSetupComplete -> UserSpaceSetupComplete) + (UserTrampolineSetupComplete -> PatchingUserSpaceComplete)
+    # Together with stages 1-4, this sums to the critical path from Plot 1
+    remaining_and_patching = [
+        (ts.user_space_setup_complete - ts.interrupt_setup_complete) +
+        (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
         for ts in results.poc_runs
     ]
     
@@ -426,7 +452,7 @@ def create_setup_breakdown_plot(results: BenchmarkResults, output_path: str):
         user_code_mapping,
         user_stack_mapping,
         interrupt_setup,
-        patching,
+        remaining_and_patching,
     ]
     
     labels = [
@@ -434,7 +460,7 @@ def create_setup_breakdown_plot(results: BenchmarkResults, output_path: str):
         'User Code\nMapping',
         'User Stack\nMapping',
         'Interrupt\nSetup',
-        'Trampoline & Handler\n Patching',
+        'Remaining Setup\n& Patching',
     ]
     
     # Use a colorful palette
@@ -480,6 +506,154 @@ def create_setup_breakdown_plot(results: BenchmarkResults, output_path: str):
     plt.close()
 
 
+def create_setup_comparison_plot(results: BenchmarkResults, output_path: str):
+    """Create the fourth plot: Side-by-side comparison of setup stages between KVM and Unikraft"""
+    
+    fig, ax = plt.subplots(figsize=(14, 7))
+    fig.suptitle('KVM vs Unikraft: Setup Stage Comparison', fontsize=14, fontweight='bold')
+    
+    # Compute Dandelion stage durations (relative to EngineStart)
+    # These must sum to: engine_setup_end - engine_start (the critical path from Plot 1)
+    
+    # Stage 1: Buffer Allocation (EngineStart -> BufferAllocationComplete)
+    dandelion_buffer_alloc = [
+        max(0, ts.buffer_allocation_complete - ts.engine_start)
+        for ts in results.dandelion_runs
+    ]
+    
+    # Stage 2: User Code Mapping (BufferAllocationComplete -> UserCodeMappingComplete)
+    dandelion_user_code_mapping = [
+        max(0, ts.user_code_mapping_complete - ts.buffer_allocation_complete)
+        for ts in results.dandelion_runs
+    ]
+    
+    # Stage 3: User Stack Mapping (UserCodeMappingComplete -> UserStackMappingComplete)
+    dandelion_user_stack_mapping = [
+        max(0, ts.user_stack_mapping_complete - ts.user_code_mapping_complete)
+        for ts in results.dandelion_runs
+    ]
+    
+    # Stage 4: Final Setup (UserStackMappingComplete -> EngineSetupEnd)
+    dandelion_final_setup = [
+        max(0, ts.engine_setup_end - ts.user_stack_mapping_complete)
+        for ts in results.dandelion_runs
+    ]
+    
+    # Compute PoC stage durations
+    # These must sum to: user_space_setup_complete + (patching_user_space_complete - user_trampoline_setup_complete)
+    # which is the critical path from Plot 1
+    
+    # Stage 1: Buffer Allocation (0 -> BufferAllocationComplete)
+    poc_buffer_alloc = [max(0, ts.buffer_allocation_complete) for ts in results.poc_runs]
+    
+    # Stage 2: User Code Mapping (BufferAllocationComplete -> UserCodeMappingComplete)
+    poc_user_code_mapping = [
+        max(0, ts.user_code_mapping_complete - ts.buffer_allocation_complete)
+        for ts in results.poc_runs
+    ]
+    
+    # Stage 3: User Stack Mapping (UserCodeMappingComplete -> UserStackMappingComplete)
+    poc_user_stack_mapping = [
+        max(0, ts.user_stack_mapping_complete - ts.user_code_mapping_complete)
+        for ts in results.poc_runs
+    ]
+    
+    # Stage 4: Final Setup = (UserStackMappingComplete -> UserSpaceSetupComplete) + (UserTrampolineSetupComplete -> PatchingUserSpaceComplete)
+    # This includes: interrupt setup + any remaining user space setup + patching
+    poc_final_setup = [
+        max(0, (ts.user_space_setup_complete - ts.user_stack_mapping_complete) + 
+            (ts.patching_user_space_complete - ts.user_trampoline_setup_complete))
+        for ts in results.poc_runs
+    ]
+    
+    # Setup grouped bar chart
+    stages = ['Buffer Alloc\n& Page Setup', 'User Code\nMapping', 'User Stack\nMapping', 'Final Setup\n& Patching']
+    x = np.arange(len(stages))
+    width = 0.35
+    
+    # Calculate means for bar heights
+    dandelion_means = [
+        statistics.mean(dandelion_buffer_alloc) if dandelion_buffer_alloc else 0,
+        statistics.mean(dandelion_user_code_mapping) if dandelion_user_code_mapping else 0,
+        statistics.mean(dandelion_user_stack_mapping) if dandelion_user_stack_mapping else 0,
+        statistics.mean(dandelion_final_setup) if dandelion_final_setup else 0,
+    ]
+    
+    poc_means = [
+        statistics.mean(poc_buffer_alloc) if poc_buffer_alloc else 0,
+        statistics.mean(poc_user_code_mapping) if poc_user_code_mapping else 0,
+        statistics.mean(poc_user_stack_mapping) if poc_user_stack_mapping else 0,
+        statistics.mean(poc_final_setup) if poc_final_setup else 0,
+    ]
+    
+    # Calculate standard deviations for error bars
+    dandelion_stds = [
+        statistics.stdev(dandelion_buffer_alloc) if len(dandelion_buffer_alloc) > 1 else 0,
+        statistics.stdev(dandelion_user_code_mapping) if len(dandelion_user_code_mapping) > 1 else 0,
+        statistics.stdev(dandelion_user_stack_mapping) if len(dandelion_user_stack_mapping) > 1 else 0,
+        statistics.stdev(dandelion_final_setup) if len(dandelion_final_setup) > 1 else 0,
+    ]
+    
+    poc_stds = [
+        statistics.stdev(poc_buffer_alloc) if len(poc_buffer_alloc) > 1 else 0,
+        statistics.stdev(poc_user_code_mapping) if len(poc_user_code_mapping) > 1 else 0,
+        statistics.stdev(poc_user_stack_mapping) if len(poc_user_stack_mapping) > 1 else 0,
+        statistics.stdev(poc_final_setup) if len(poc_final_setup) > 1 else 0,
+    ]
+    
+    colors = {'dandelion': '#2ecc71', 'poc': '#3498db'}
+    
+    # Clip lower error bars to not go below zero (use asymmetric error bars)
+    dandelion_lower = [min(std, mean) for std, mean in zip(dandelion_stds, dandelion_means)]
+    poc_lower = [min(std, mean) for std, mean in zip(poc_stds, poc_means)]
+    
+    bars1 = ax.bar(x - width/2, dandelion_means, width, label='KVM', 
+                   color=colors['dandelion'], alpha=0.8, 
+                   yerr=[dandelion_lower, dandelion_stds], capsize=5)
+    bars2 = ax.bar(x + width/2, poc_means, width, label='Unikraft',
+                   color=colors['poc'], alpha=0.8, 
+                   yerr=[poc_lower, poc_stds], capsize=5)
+    
+    ax.set_ylabel('Time (μs)')
+    ax.set_xlabel('Setup Stage')
+    ax.set_xticks(x)
+    ax.set_xticklabels(stages)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    def add_bar_labels(bars, values):
+        for bar, val in zip(bars, values):
+            if val > 0:
+                height = bar.get_height()
+                ax.annotate(f'{val:.0f}',
+                           xy=(bar.get_x() + bar.get_width() / 2, height),
+                           xytext=(0, 3),
+                           textcoords="offset points",
+                           ha='center', va='bottom',
+                           fontsize=8, fontweight='bold')
+    
+    add_bar_labels(bars1, dandelion_means)
+    add_bar_labels(bars2, poc_means)
+    
+    # Add total annotations to verify sums match Plot 1
+    dandelion_total = sum(dandelion_means)
+    poc_total = sum(poc_means)
+    
+    ax.text(0.02, 0.98, f'KVM Total: {dandelion_total:.0f}μs\nUnikraft Total: {poc_total:.0f}μs',
+            transform=ax.transAxes,
+            fontsize=10,
+            fontweight='bold',
+            verticalalignment='top',
+            horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Saved setup comparison plot to: {output_path}")
+    plt.close()
+
+
 def print_summary(results: BenchmarkResults):
     """Print a summary of the benchmark results"""
     print("\n" + "="*60)
@@ -519,6 +693,66 @@ def print_summary(results: BenchmarkResults):
               f"min={min(d_setup)}, max={max(d_setup)}")
         print(f"  Execution time: mean={statistics.mean(d_exec):.0f}, "
               f"min={min(d_exec)}, max={max(d_exec)}")
+    
+    # Data consistency verification
+    print("\n--- Data Consistency Check ---")
+    
+    if results.poc_runs:
+        # Plot 1 PoC Setup Critical Path
+        plot1_poc_setup = [
+            ts.user_space_setup_complete + (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
+            for ts in results.poc_runs
+        ]
+        
+        # Plot 3 stages sum (should equal Plot 1)
+        plot3_poc_sum = [
+            ts.buffer_allocation_complete +
+            (ts.user_code_mapping_complete - ts.buffer_allocation_complete) +
+            (ts.user_stack_mapping_complete - ts.user_code_mapping_complete) +
+            (ts.interrupt_setup_complete - ts.user_stack_mapping_complete) +
+            (ts.user_space_setup_complete - ts.interrupt_setup_complete) +
+            (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
+            for ts in results.poc_runs
+        ]
+        
+        # Plot 4 PoC stages sum (should equal Plot 1)
+        plot4_poc_sum = [
+            ts.buffer_allocation_complete +
+            (ts.user_code_mapping_complete - ts.buffer_allocation_complete) +
+            (ts.user_stack_mapping_complete - ts.user_code_mapping_complete) +
+            (ts.user_space_setup_complete - ts.user_stack_mapping_complete) +
+            (ts.patching_user_space_complete - ts.user_trampoline_setup_complete)
+            for ts in results.poc_runs
+        ]
+        
+        print(f"  PoC Plot 1 Setup Critical Path: mean={statistics.mean(plot1_poc_setup):.1f}μs")
+        print(f"  PoC Plot 3 Stages Sum:          mean={statistics.mean(plot3_poc_sum):.1f}μs")
+        print(f"  PoC Plot 4 Stages Sum:          mean={statistics.mean(plot4_poc_sum):.1f}μs")
+        
+        # Check if they match
+        poc_match = abs(statistics.mean(plot1_poc_setup) - statistics.mean(plot3_poc_sum)) < 0.1 and \
+                    abs(statistics.mean(plot1_poc_setup) - statistics.mean(plot4_poc_sum)) < 0.1
+        print(f"  PoC consistency: {'✓ PASS' if poc_match else '✗ FAIL'}")
+    
+    if results.dandelion_runs:
+        # Plot 1 Dandelion Setup
+        plot1_dandelion_setup = [ts.engine_setup_end - ts.engine_start for ts in results.dandelion_runs]
+        
+        # Plot 4 Dandelion stages sum (should equal Plot 1)
+        plot4_dandelion_sum = [
+            max(0, ts.buffer_allocation_complete - ts.engine_start) +
+            max(0, ts.user_code_mapping_complete - ts.buffer_allocation_complete) +
+            max(0, ts.user_stack_mapping_complete - ts.user_code_mapping_complete) +
+            max(0, ts.engine_setup_end - ts.user_stack_mapping_complete)
+            for ts in results.dandelion_runs
+        ]
+        
+        print(f"  Dandelion Plot 1 Setup:         mean={statistics.mean(plot1_dandelion_setup):.1f}μs")
+        print(f"  Dandelion Plot 4 Stages Sum:    mean={statistics.mean(plot4_dandelion_sum):.1f}μs")
+        
+        # Check if they match
+        dandelion_match = abs(statistics.mean(plot1_dandelion_setup) - statistics.mean(plot4_dandelion_sum)) < 0.1
+        print(f"  Dandelion consistency: {'✓ PASS' if dandelion_match else '✗ FAIL'}")
     
     print("\n" + "="*60)
 
@@ -571,6 +805,7 @@ def main():
     
     if results.poc_runs and results.dandelion_runs:
         create_comparison_plot(results, str(output_dir / "benchmark_comparison.png"))
+        create_setup_comparison_plot(results, str(output_dir / "benchmark_setup_comparison.png"))
     
     if results.poc_runs:
         create_detailed_plot(results, str(output_dir / "benchmark_detailed.png"))
