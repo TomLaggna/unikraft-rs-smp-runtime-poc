@@ -105,10 +105,17 @@ impl TimePoint {
     }
 }
 
-/// Read the CPU timestamp counter
+/// Read the CPU timestamp counter with serialization
+/// Using lfence before rdtsc ensures all previous instructions complete
+/// before the timestamp is read, preventing out-of-order execution
+/// from skewing measurements.
 #[inline]
 fn read_tsc() -> u64 {
-    unsafe { _rdtsc() }
+    unsafe {
+        // lfence serializes instruction stream - ensures all prior loads complete
+        core::arch::asm!("lfence", options(nostack, preserves_flags));
+        _rdtsc()
+    }
 }
 
 /// Initialize the global timer (call once at start)
@@ -179,6 +186,11 @@ pub fn add_vec_alloc_cycles(cycles: u64) {
 #[inline]
 pub fn add_page_touch_cycles(cycles: u64) {
     PAGE_TOUCH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+}
+
+/// Increment the page touch counter (separate from cycles accumulation)
+#[inline]
+pub fn increment_page_touch_count() {
     PAGE_TOUCH_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 

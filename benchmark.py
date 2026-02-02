@@ -23,6 +23,10 @@ import numpy as np
 @dataclass
 class PoCTimestamps:
     """Timestamps from the PoC benchmark (in microseconds)"""
+    buffer_allocation_complete: int = 0
+    user_code_mapping_complete: int = 0
+    user_stack_mapping_complete: int = 0
+    interrupt_setup_complete: int = 0
     user_space_setup_complete: int = 0
     user_trampoline_setup_complete: int = 0
     patching_user_space_complete: int = 0
@@ -78,7 +82,15 @@ def run_poc_benchmark() -> Optional[PoCTimestamps]:
         name, micros = match.groups()
         micros = int(micros)
         
-        if name == "USER_SPACE_SETUP_COMPLETE":
+        if name == "BUFFER_ALLOCATION_COMPLETE":
+            timestamps.buffer_allocation_complete = micros
+        elif name == "USER_CODE_MAPPING_COMPLETE":
+            timestamps.user_code_mapping_complete = micros
+        elif name == "USER_STACK_MAPPING_COMPLETE":
+            timestamps.user_stack_mapping_complete = micros
+        elif name == "INTERRUPT_SETUP_COMPLETE":
+            timestamps.interrupt_setup_complete = micros
+        elif name == "USER_SPACE_SETUP_COMPLETE":
             timestamps.user_space_setup_complete = micros
         elif name == "USER_TRAMPOLINE_SETUP_COMPLETE":
             timestamps.user_trampoline_setup_complete = micros
@@ -373,6 +385,101 @@ def create_detailed_plot(results: BenchmarkResults, output_path: str):
     plt.close()
 
 
+def create_setup_breakdown_plot(results: BenchmarkResults, output_path: str):
+    """Create the third plot: Setup critical path breakdown showing stages up to and including PatchingUserSpaceComplete"""
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    fig.suptitle('Unikraft PoC Setup Critical Path Breakdown', fontsize=14, fontweight='bold')
+    
+    # Compute stage durations (deltas between consecutive timestamps)
+    # Stage 1: Buffer Allocation (0 -> BufferAllocationComplete)
+    buffer_alloc = [ts.buffer_allocation_complete for ts in results.poc_runs]
+    
+    # Stage 2: User Code Mapping (BufferAllocationComplete -> UserCodeMappingComplete)
+    user_code_mapping = [
+        ts.user_code_mapping_complete - ts.buffer_allocation_complete
+        for ts in results.poc_runs
+    ]
+    
+    # Stage 3: User Stack Mapping (UserCodeMappingComplete -> UserStackMappingComplete)
+    user_stack_mapping = [
+        ts.user_stack_mapping_complete - ts.user_code_mapping_complete
+        for ts in results.poc_runs
+    ]
+    
+    # Stage 4: Interrupt Setup (UserStackMappingComplete -> InterruptSetupComplete)
+    interrupt_setup = [
+        ts.interrupt_setup_complete - ts.user_stack_mapping_complete
+        for ts in results.poc_runs
+    ]
+    
+    # Stage 5: Patching (UserTrampolineSetupComplete -> PatchingUserSpaceComplete)
+    # Note: This includes time for patching the user trampoline and interrupt handler
+    patching = [
+        ts.patching_user_space_complete - ts.user_trampoline_setup_complete
+        for ts in results.poc_runs
+    ]
+    
+    # All data for boxplot
+    all_data = [
+        buffer_alloc,
+        user_code_mapping,
+        user_stack_mapping,
+        interrupt_setup,
+        patching,
+    ]
+    
+    labels = [
+        'Buffer Mapping\n& Paging Setup',
+        'User Code\nMapping',
+        'User Stack\nMapping',
+        'Interrupt\nSetup',
+        'Trampoline & Handler\n Patching',
+    ]
+    
+    # Use a colorful palette
+    colors = ['#3498db', '#2ecc71', '#9b59b6', '#e74c3c', '#f39c12']
+    
+    bp = ax.boxplot(all_data, labels=labels, patch_artist=True)
+    
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    ax.set_ylabel('Time (μs)')
+    ax.set_xlabel('Setup Stage')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add mean annotations
+    for i, data in enumerate(all_data):
+        if data:
+            mean = statistics.mean(data)
+            # Position annotation above the box
+            max_val = max(data) if max(data) > 0 else 1
+            ax.annotate(f'{mean:.0f}μs', 
+                       xy=(i + 1, mean), 
+                       xytext=(i + 1, max_val + max_val * 0.15),
+                       ha='center',
+                       fontsize=9,
+                       fontweight='bold')
+    
+    # Add total setup time annotation
+    total_setup = [ts.user_space_setup_complete + (ts.patching_user_space_complete - ts.user_trampoline_setup_complete) for ts in results.poc_runs]
+    total_mean = statistics.mean(total_setup)
+    ax.text(0.98, 0.98, f'Total Setup: {total_mean:.0f}μs',
+            transform=ax.transAxes,
+            fontsize=11,
+            fontweight='bold',
+            verticalalignment='top',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Saved setup breakdown plot to: {output_path}")
+    plt.close()
+
+
 def print_summary(results: BenchmarkResults):
     """Print a summary of the benchmark results"""
     print("\n" + "="*60)
@@ -467,6 +574,7 @@ def main():
     
     if results.poc_runs:
         create_detailed_plot(results, str(output_dir / "benchmark_detailed.png"))
+        create_setup_breakdown_plot(results, str(output_dir / "benchmark_setup_breakdown.png"))
     
     print(f"\nBenchmark complete!")
 

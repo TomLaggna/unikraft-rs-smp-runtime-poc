@@ -12,7 +12,7 @@
 
 use crate::timing::{
     add_page_table_init_cycles, add_page_touch_cycles, add_vec_alloc_cycles,
-    add_virt_to_phys_cycles, rdtsc,
+    add_virt_to_phys_cycles, increment_page_touch_count, rdtsc,
 };
 use core::arch::asm;
 use core::ptr;
@@ -90,6 +90,8 @@ unsafe fn ensure_page_mapped(addr: *mut u8) {
     // A volatile write ensures the compiler doesn't optimize this away
     // and forces the kernel to map the page
     core::ptr::write_volatile(addr, core::ptr::read_volatile(addr));
+    // Count this page touch for timing statistics
+    increment_page_touch_count();
 }
 
 /// Touch all pages in a range to ensure they're mapped
@@ -198,7 +200,8 @@ fn get_p2(current_page_entry: usize) -> (usize, usize) {
 ///
 /// # Arguments
 /// * `table_array` - The combined p2+p1 tables array
-/// * `table_base` - Base address (in guest_mem) where table_array starts
+/// * `table_base_ptr` - Raw pointer to start of table_array (for lazy page touching)
+/// * `table_base_virt` - Base address (in guest_mem) where table_array starts
 /// * `virtual_start` - Start of virtual address range (guest virtual)
 /// * `virtual_end` - End of virtual address range (exclusive)
 /// * `protection_flags` - Page protection flags (PDE64_*)
@@ -209,6 +212,7 @@ fn get_p2(current_page_entry: usize) -> (usize, usize) {
 /// The past-last-page index for this range (for next call)
 fn set_range(
     table_array: &mut [u64],
+    table_base_ptr: *mut u8,
     table_base_virt: u64,
     virtual_start: usize,
     virtual_end: usize,
@@ -218,6 +222,18 @@ fn set_range(
 ) -> Result<usize, &'static str> {
     let mut current_page_entry = virtual_start >> PAGE_SHIFT;
     let past_last_page = virtual_end >> PAGE_SHIFT;
+
+    // Helper to ensure page containing table entry is mapped before writing
+    // entry_idx is the index into table_array (u64 entries)
+    let ensure_entry_page_mapped = |entry_idx: usize| {
+        // Calculate byte offset of this entry
+        let byte_offset = entry_idx * core::mem::size_of::<u64>();
+        // Round down to page boundary
+        let page_offset = byte_offset & !(PAGE_SIZE - 1);
+        unsafe {
+            ensure_page_mapped(table_base_ptr.add(page_offset));
+        }
+    };
 
     // Ensure no overlap with previous range
     debug_assert!(previous_past_last_page <= current_page_entry);
@@ -229,6 +245,9 @@ fn set_range(
         let (p2_base, p2_entry) = get_p2(current_page_entry);
         let p1_offset = p2_base + (1 + p2_entry) * TABLE_SIZE;
 
+        // Ensure page containing P1 table is mapped before translating
+        ensure_entry_page_mapped(p1_offset);
+
         // Translate P1 table's virtual address to physical
         let p1_virt = table_base_virt + (p1_offset * core::mem::size_of::<u64>()) as u64;
         let p1_phys = unsafe {
@@ -236,6 +255,8 @@ fn set_range(
                 .ok_or("Failed to translate P1 table virtual address to physical")?
         };
 
+        // Ensure page containing P2 entry is mapped before writing
+        ensure_entry_page_mapped(p2_base + p2_entry);
         table_array[p2_base + p2_entry] = PDE64_ALL_ALLOWED | p1_phys;
         // table_array[p1_offset..p1_offset + (current_page_entry % TABLE_SIZE)].fill(0);
     }
@@ -257,18 +278,27 @@ fn set_range(
                         .ok_or("Failed to translate kernel virtual address to physical")?
                 };
 
+                // Ensure page containing P2 entry is mapped before writing
+                ensure_entry_page_mapped(p2_base + p2_entry);
                 table_array[p2_base + p2_entry] = protection_flags | PDE64_IS_PAGE | phys;
                 current_page_entry += TABLE_SIZE;
                 continue;
             } else {
                 // Need a p1 table for partial 2MB region - translate its virtual address
                 let p1_offset_idx = p2_base + (1 + p2_entry) * TABLE_SIZE;
+
+                // Ensure page containing P1 table is mapped before translating
+                ensure_entry_page_mapped(p1_offset_idx);
+
                 let p1_virt =
                     table_base_virt + (p1_offset_idx * core::mem::size_of::<u64>()) as u64;
                 let p1_phys = unsafe {
                     virt_to_phys(p1_virt)
                         .ok_or("Failed to translate P1 table virtual address to physical")?
                 };
+
+                // Ensure page containing P2 entry is mapped before writing
+                ensure_entry_page_mapped(p2_base + p2_entry);
                 table_array[p2_base + p2_entry] = PDE64_ALL_ALLOWED | p1_phys;
             }
         }
@@ -283,6 +313,8 @@ fn set_range(
         };
 
         let p1_base = p2_base + (1 + p2_entry) * TABLE_SIZE;
+        // Ensure page containing P1 entry is mapped before writing
+        ensure_entry_page_mapped(p1_base + p1_offset);
         table_array[p1_base + p1_offset] = protection_flags | phys;
 
         current_page_entry += 1;
@@ -546,8 +578,12 @@ impl UserSpaceManager {
         ensure_page_mapped(guest_mem_ptr.add(trampoline_p2_offset));
         ensure_page_mapped(guest_mem_ptr.add(trampoline_p1_offset));
 
-        // Touch P2+P1 table pages
-        ensure_pages_mapped(guest_mem_ptr.add(p2p1_offset), p2p1_size);
+        // Touch the FIRST page of each P2 table (needed for P3 setup to translate P2 addresses)
+        // P1 pages are touched LAZILY in set_range when mappings are installed
+        for p2_idx in 0..p2_table_number {
+            let p2_offset_in_tables = p2_idx * (TABLE_SIZE + 1) * PAGE_SIZE;
+            ensure_page_mapped(guest_mem_ptr.add(p2p1_offset + p2_offset_in_tables));
+        }
 
         // Touch interrupt structure pages (handler code, GDT/TSS/IDT page, interrupt stack)
         ensure_page_mapped(guest_mem_ptr.add(handler_code_offset)); // Handler code page
@@ -766,12 +802,14 @@ impl UserSpaceManager {
         // println!("  table_base offset: 0x{:x}", table_base);
         // println!("  table_base KVA: 0x{:x}", table_base_kva);
 
+        let table_base_ptr = guest_mem.as_mut_ptr().wrapping_add(table_base);
         let (_, table_raw) = guest_mem.split_at_mut(table_base);
         let table_array = u8_slice_to_u64_slice(&mut table_raw[0..table_size]);
 
-        // Use set_range to map the pages
+        // Use set_range to map the pages (P2/P1 pages are touched lazily)
         set_range(
             table_array,
+            table_base_ptr,
             table_base_kva,
             user_virt_start,
             user_virt_start + size,
