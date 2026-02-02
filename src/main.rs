@@ -217,6 +217,8 @@ fn main() {
         }
     };
 
+    record(TimePoint::BufferAllocationComplete);
+
     // Get user code from assembly module
     let user_code_asm = unsafe { user_code::get_user_code() };
     let user_code_entry_offset = unsafe { user_code::get_entry_offset() };
@@ -259,6 +261,8 @@ fn main() {
         panic!("Failed to map user code: {}", e);
     }
 
+    record(TimePoint::UserCodeMappingComplete);
+
     // Stack must end BEFORE interrupt structures to avoid overlap
     let user_stack_size = 16 * 4096; // 64KB
     let user_stack_buf = vec![0u8; user_stack_size];
@@ -289,6 +293,8 @@ fn main() {
     } {
         panic!("Failed to map user stack: {}", e);
     }
+
+    record(TimePoint::UserStackMappingComplete);
 
     // User code entry point
     let user_entry_va = user_code_virt;
@@ -323,6 +329,7 @@ fn main() {
         }
     };
 
+    record(TimePoint::InterruptSetupComplete);
     record(TimePoint::UserSpaceSetupComplete);
 
     // ========================================================================

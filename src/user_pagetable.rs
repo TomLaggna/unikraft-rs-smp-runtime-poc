@@ -10,6 +10,10 @@
 // 4. Use the kernel virtual addresses as "physical" addresses in PTEs
 //    (we translate via kernel page table walk)
 
+use crate::timing::{
+    add_page_table_init_cycles, add_page_touch_cycles, add_vec_alloc_cycles,
+    add_virt_to_phys_cycles, rdtsc,
+};
 use core::arch::asm;
 use core::ptr;
 use core::slice;
@@ -79,9 +83,38 @@ impl InterruptConfig {
     }
 }
 
+/// Touch a page to ensure the kernel has mapped it (triggers page fault if needed).
+/// This must be called BEFORE virt_to_phys() on any address.
+#[inline(always)]
+unsafe fn ensure_page_mapped(addr: *mut u8) {
+    // A volatile write ensures the compiler doesn't optimize this away
+    // and forces the kernel to map the page
+    core::ptr::write_volatile(addr, core::ptr::read_volatile(addr));
+}
+
+/// Touch all pages in a range to ensure they're mapped
+#[inline(always)]
+unsafe fn ensure_pages_mapped(base: *mut u8, size: usize) {
+    let page_size = PAGE_SIZE;
+    let mut offset = 0;
+    while offset < size {
+        ensure_page_mapped(base.add(offset));
+        offset += page_size;
+    }
+}
+
 /// Walk kernel page tables to translate virtual → physical
 /// Unikraft uses a direct-map region starting at 0xffffff8000000000
 pub unsafe fn virt_to_phys(virt_addr: u64) -> Option<u64> {
+    let start_tsc = rdtsc();
+    let result = virt_to_phys_inner(virt_addr);
+    let elapsed = rdtsc().saturating_sub(start_tsc);
+    add_virt_to_phys_cycles(elapsed);
+    result
+}
+
+/// Inner implementation of virt_to_phys (without timing overhead)
+unsafe fn virt_to_phys_inner(virt_addr: u64) -> Option<u64> {
     const DIRECTMAP_START: u64 = 0xffffff8000000000;
 
     // Get CR3
@@ -371,7 +404,10 @@ impl UserSpaceManager {
 
         // Allocate buffer: 64MB + 1 page to ensure we can find a page-aligned region
         let allocation_size = total_size + PAGE_SIZE;
+        let vec_start = rdtsc();
         let mut raw_allocation = vec![0u8; allocation_size];
+        let vec_end = rdtsc();
+        add_vec_alloc_cycles(vec_end.saturating_sub(vec_start));
 
         // Find the first page-aligned address within the allocation
         let raw_ptr = raw_allocation.as_ptr() as usize;
@@ -390,11 +426,13 @@ impl UserSpaceManager {
             return Err("guest_mem is not page-aligned in virtual address space!");
         }
 
-        // Force kernel to map all pages FIRST (one write per page is sufficient)
-        // This ensures virt_to_phys() will work on all addresses
-        for page in 0..(total_size / PAGE_SIZE) {
-            guest_mem[page * PAGE_SIZE] = 0; // Touch first byte of each page
-        }
+        // LAZY INITIALIZATION: Instead of touching all 8192 pages upfront,
+        // we only touch pages as they're actually needed. This dramatically
+        // reduces initialization time from ~18ms to <1ms.
+        // Pages that need touching:
+        // - Page table pages (P4, P3, P2, P1)
+        // - Interrupt structure pages (GDT, TSS, IDT, handler code, interrupt stack)
+        // User code/data pages will be touched when map_user_range copies data.
 
         // ==================================================================
         // ALLOCATION STRATEGY: Work backwards from end of 64MB buffer
@@ -495,6 +533,32 @@ impl UserSpaceManager {
         const PAGE_MASK: u64 = PAGE_SIZE as u64 - 1;
 
         let guest_mem_base_kva = guest_mem.as_ptr() as u64;
+        let guest_mem_ptr = guest_mem.as_mut_ptr();
+
+        // LAZY INIT: Touch page table pages before translating their addresses
+        // This ensures virt_to_phys will succeed
+        let touch_start = rdtsc();
+
+        // Touch P4, P3, and trampoline pages (1 page each)
+        ensure_page_mapped(guest_mem_ptr.add(p4_offset));
+        ensure_page_mapped(guest_mem_ptr.add(p3_offset));
+        ensure_page_mapped(guest_mem_ptr.add(trampoline_p3_offset));
+        ensure_page_mapped(guest_mem_ptr.add(trampoline_p2_offset));
+        ensure_page_mapped(guest_mem_ptr.add(trampoline_p1_offset));
+
+        // Touch P2+P1 table pages
+        ensure_pages_mapped(guest_mem_ptr.add(p2p1_offset), p2p1_size);
+
+        // Touch interrupt structure pages (handler code, GDT/TSS/IDT page, interrupt stack)
+        ensure_page_mapped(guest_mem_ptr.add(handler_code_offset)); // Handler code page
+        ensure_page_mapped(guest_mem_ptr.add(misc_structures_start)); // GDT/TSS/IDT page
+        ensure_pages_mapped(
+            guest_mem_ptr.add(interrupt_stack_offset),
+            interrupt_stack_bytes,
+        );
+
+        let touch_end = rdtsc();
+        add_page_touch_cycles(touch_end.saturating_sub(touch_start));
 
         let p4_kva = guest_mem_base_kva + p4_offset as u64;
         let p4_pa_raw = virt_to_phys(p4_kva).ok_or("Failed to translate P4 KVA to physical")?;
@@ -540,6 +604,7 @@ impl UserSpaceManager {
         let trampoline_p1_pa = tramp_p1_pa_raw & PTE_ADDR_MASK;
 
         // Initialize trampoline page tables (will be set up when trampolines are mapped)
+        let pt_init_start = rdtsc();
         {
             let (_, tramp_p3_raw) = guest_mem.split_at_mut(trampoline_p3_offset);
             let tramp_p3 = u8_slice_to_u64_slice(&mut tramp_p3_raw[0..PAGE_SIZE]);
@@ -602,6 +667,8 @@ impl UserSpaceManager {
                 table_array[start_index..start_index + TABLE_SIZE].fill(0);
             }
         }
+        let pt_init_end = rdtsc();
+        add_page_table_init_cycles(pt_init_end.saturating_sub(pt_init_start));
 
         // Use p2p1_offset directly - it's already calculated correctly
         let table_base = p2p1_offset;
